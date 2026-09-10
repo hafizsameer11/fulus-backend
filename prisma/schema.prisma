@@ -1,0 +1,608 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum KycStatus {
+  NOT_STARTED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KycCheckType {
+  BVN
+  NIN
+  FACE
+  ADDRESS
+  DOCUMENT
+}
+
+enum KycCheckStatus {
+  PENDING
+  PASSED
+  FAILED
+}
+
+enum WalletCurrency {
+  NGN
+  USD
+  SAR
+  USDT
+  BTC
+  ETH
+}
+
+enum LedgerEntryType {
+  CREDIT
+  DEBIT
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  SWAP
+  BILL_PAYMENT
+  CARD_FUND
+  CARD_WITHDRAW
+  CRYPTO_BUY
+  CRYPTO_SELL
+  CRYPTO_SEND
+  CRYPTO_RECEIVE
+  ESIM_PURCHASE
+  FEE
+  ADJUSTMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REVERSED
+}
+
+enum CardStatus {
+  PENDING
+  ACTIVE
+  FROZEN
+  TERMINATED
+  FAILED
+}
+
+enum CryptoOrderSide {
+  BUY
+  SELL
+}
+
+enum BillCategory {
+  AIRTIME
+  DATA
+  ELECTRICITY
+  CABLE
+  BETTING
+  EDUCATION
+  OTHER
+}
+
+enum EsimStatus {
+  ORDERED
+  READY
+  INSTALLED
+  DEPLETED
+  EXPIRED
+  FAILED
+}
+
+enum DepositMethod {
+  BANK_TRANSFER
+  VIRTUAL_ACCOUNT
+  CRYPTO
+  MANUAL
+}
+
+enum BeneficiaryType {
+  BANK
+  CRYPTO
+  BILLER
+  FULUS_USER
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  phone        String?    @unique
+  passwordHash String
+  firstName    String?
+  lastName     String?
+  status       UserStatus @default(ACTIVE)
+  kycStatus    KycStatus  @default(NOT_STARTED)
+  kycTier      Int        @default(0)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  wallets         Wallet[]
+  kycChecks       KycCheck[]
+  cards           Card[]
+  transactions    Transaction[]
+  billPayments    BillPayment[]
+  cryptoOrders    CryptoOrder[]
+  esims           Esim[]
+  refreshTokens   RefreshToken[]
+  deposits        Deposit[]
+  virtualAccounts VirtualAccount[]
+  beneficiaries   Beneficiary[]
+  bankTransfers   BankTransfer[]
+  swaps           Swap[]
+  cryptoAddresses CryptoAddress[]
+  inboxMessages   InboxMessage[]
+
+  @@index([status])
+  @@index([kycStatus])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Wallet {
+  id        String         @id @default(cuid())
+  userId    String
+  currency  WalletCurrency
+  /// USD and SAR are virtual ledger balances funded via admin FX swap
+  isVirtual Boolean        @default(false)
+  available Decimal        @default(0) @db.Decimal(24, 8)
+  pending   Decimal        @default(0) @db.Decimal(24, 8)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries LedgerEntry[]
+
+  @@unique([userId, currency])
+  @@index([userId])
+}
+
+model LedgerEntry {
+  id            String          @id @default(cuid())
+  walletId      String
+  transactionId String?
+  type          LedgerEntryType
+  amount        Decimal         @db.Decimal(24, 8)
+  balanceAfter  Decimal         @db.Decimal(24, 8)
+  description   String?
+  metadata      Json?
+  createdAt     DateTime        @default(now())
+
+  wallet      Wallet       @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  transaction Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([walletId, createdAt])
+  @@index([transactionId])
+}
+
+model Transaction {
+  id          String            @id @default(cuid())
+  userId      String
+  type        TransactionType
+  status      TransactionStatus @default(PENDING)
+  amount      Decimal           @db.Decimal(24, 8)
+  fee         Decimal           @default(0) @db.Decimal(24, 8)
+  currency    WalletCurrency
+  reference   String            @unique
+  provider    String?
+  providerRef String?
+  description String?
+  metadata    Json?
+  idempotencyKey String?        @unique
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries LedgerEntry[]
+  billPayment   BillPayment?
+  cryptoOrder   CryptoOrder?
+  cardFunding   CardFunding?
+  esimOrder     EsimOrder?
+  deposit       Deposit?
+  bankTransfer  BankTransfer?
+  swap          Swap?
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@index([provider, providerRef])
+}
+
+model FxRate {
+  id            String         @id @default(cuid())
+  baseCurrency  WalletCurrency
+  quoteCurrency WalletCurrency
+  midRate       Decimal        @db.Decimal(24, 12)
+  baseBps       Int            @default(90)
+  tier1Bps      Int            @default(35)
+  tier2Bps      Int            @default(12)
+  tier3Bps      Int            @default(0)
+  overrideRate  Decimal?       @db.Decimal(24, 12)
+  overrideNote  String?
+  active        Boolean        @default(true)
+  createdBy     String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  swaps Swap[]
+
+  @@unique([baseCurrency, quoteCurrency])
+  @@index([active])
+}
+
+model Swap {
+  id             String            @id @default(cuid())
+  userId         String
+  transactionId  String            @unique
+  fromCurrency   WalletCurrency
+  toCurrency     WalletCurrency
+  fromAmount     Decimal           @db.Decimal(24, 8)
+  toAmount       Decimal           @db.Decimal(24, 8)
+  rateApplied    Decimal           @db.Decimal(24, 12)
+  midRate        Decimal           @db.Decimal(24, 12)
+  spreadBps      Int
+  fxRateId       String?
+  status         TransactionStatus @default(SUCCESS)
+  createdAt      DateTime          @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  fxRate      FxRate?     @relation(fields: [fxRateId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}
+
+model Deposit {
+  id            String            @id @default(cuid())
+  userId        String
+  transactionId String?           @unique
+  method        DepositMethod     @default(VIRTUAL_ACCOUNT)
+  currency      WalletCurrency
+  amount        Decimal?          @db.Decimal(24, 8)
+  status        TransactionStatus @default(PENDING)
+  provider      String?
+  providerRef   String?
+  instructions  Json?
+  metadata      Json?
+  confirmedAt   DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model VirtualAccount {
+  id            String         @id @default(cuid())
+  userId        String
+  currency      WalletCurrency @default(NGN)
+  provider      String         @default("fulus")
+  accountName   String
+  accountNumber String
+  bankName      String?
+  bankCode      String?
+  providerRef   String?
+  status        String         @default("ACTIVE")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, currency, provider])
+  @@index([accountNumber])
+}
+
+model Beneficiary {
+  id            String          @id @default(cuid())
+  userId        String
+  type          BeneficiaryType
+  label         String
+  currency      WalletCurrency?
+  accountName   String?
+  accountNumber String?
+  bankCode      String?
+  bankName      String?
+  network       String?
+  address       String?
+  fulusUserId   String?
+  serviceId     String?
+  customerRef   String?
+  lastUsedAt    DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankTransfers BankTransfer[]
+
+  @@index([userId, type])
+}
+
+model BankTransfer {
+  id            String            @id @default(cuid())
+  userId        String
+  transactionId String            @unique
+  beneficiaryId String?
+  currency      WalletCurrency    @default(NGN)
+  amount        Decimal           @db.Decimal(24, 8)
+  fee           Decimal           @default(0) @db.Decimal(24, 8)
+  accountName   String
+  accountNumber String
+  bankCode      String
+  bankName      String?
+  narration     String?
+  provider      String?
+  providerRef   String?
+  status        TransactionStatus @default(PENDING)
+  failureReason String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  beneficiary Beneficiary? @relation(fields: [beneficiaryId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}
+
+model BillService {
+  id           String       @id
+  category     BillCategory
+  name         String
+  shortName    String?
+  logoKey      String
+  country      String       @default("NG")
+  provider     String       @default("strowallet")
+  providerCode String
+  accent       String?
+  isActive     Boolean      @default(true)
+  metadata     Json?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  variations BillVariation[]
+
+  @@index([category, isActive])
+}
+
+model BillVariation {
+  id        String   @id @default(cuid())
+  serviceId String
+  code      String
+  name      String
+  amount    Decimal? @db.Decimal(24, 8)
+  metadata  Json?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  service BillService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, code])
+}
+
+model KycCheck {
+  id            String         @id @default(cuid())
+  userId        String
+  type          KycCheckType
+  status        KycCheckStatus @default(PENDING)
+  provider      String         @default("prembly")
+  providerRef   String?
+  input         Json?
+  result        Json?
+  failureReason String?        @db.Text
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([status])
+}
+
+model Card {
+  id              String     @id @default(cuid())
+  userId          String
+  provider        String     @default("pagocards")
+  providerCardId  String?
+  brand           String     @default("VISA")
+  binHint         String     @default("43")
+  last4           String?
+  expMonth        Int?
+  expYear         Int?
+  currency        String     @default("USD")
+  status          CardStatus @default(PENDING)
+  label           String?
+  balance         Decimal    @default(0) @db.Decimal(24, 8)
+  providerPayload Json?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fundings CardFunding[]
+
+  @@unique([provider, providerCardId])
+  @@index([userId])
+  @@index([status])
+}
+
+model CardFunding {
+  id            String   @id @default(cuid())
+  cardId        String
+  transactionId String   @unique
+  amount        Decimal  @db.Decimal(24, 8)
+  direction     String
+  providerRef   String?
+  createdAt     DateTime @default(now())
+
+  card        Card        @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([cardId])
+}
+
+model CryptoOrder {
+  id              String            @id @default(cuid())
+  userId          String
+  transactionId   String            @unique
+  side            CryptoOrderSide
+  baseCurrency    String
+  quoteCurrency   String
+  amount          Decimal           @db.Decimal(24, 8)
+  quoteAmount     Decimal?          @db.Decimal(24, 8)
+  rate            Decimal?          @db.Decimal(24, 12)
+  network         String?
+  provider        String            @default("busha")
+  providerRef     String?
+  status          TransactionStatus @default(PENDING)
+  providerPayload Json?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([providerRef])
+}
+
+model BillPayment {
+  id              String            @id @default(cuid())
+  userId          String
+  transactionId   String            @unique
+  category        BillCategory
+  serviceId       String
+  customerRef     String
+  variationCode   String?
+  amount          Decimal           @db.Decimal(24, 8)
+  phone           String?
+  provider        String            @default("strowallet")
+  providerRef     String?
+  status          TransactionStatus @default(PENDING)
+  token           String?
+  providerPayload Json?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([category, serviceId])
+}
+
+model Esim {
+  id              String     @id @default(cuid())
+  userId          String
+  provider        String     @default("esim-go")
+  iccid           String?    @unique
+  status          EsimStatus @default(ORDERED)
+  bundleName      String?
+  label           String?
+  qrCodeUrl       String?    @db.Text
+  activationCode  String?    @db.Text
+  dataRemainingMb Int?
+  expiresAt       DateTime?
+  providerPayload Json?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders EsimOrder[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model EsimOrder {
+  id             String            @id @default(cuid())
+  esimId         String?
+  transactionId  String            @unique
+  bundleName     String
+  quantity       Int               @default(1)
+  orderReference String?
+  status         TransactionStatus @default(PENDING)
+  providerPayload Json?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  esim        Esim?       @relation(fields: [esimId], references: [id], onDelete: SetNull)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([orderReference])
+}
+
+model WebhookEvent {
+  id        String   @id @default(cuid())
+  provider  String
+  eventType String?
+  payload   Json
+  headers   Json?
+  processed Boolean  @default(false)
+  error     String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([provider, processed])
+  @@index([createdAt])
+}
+
+model CryptoAddress {
+  id        String   @id @default(cuid())
+  userId    String
+  currency  String
+  network   String
+  address   String
+  provider  String   @default("simulated")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, currency, network])
+  @@index([userId])
+}
+
+model InboxMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  body      String   @db.Text
+  category  String   @default("general")
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([createdAt])
+}

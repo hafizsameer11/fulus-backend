@@ -1,0 +1,44 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: fulus
+      MYSQL_USER: fulus
+      MYSQL_PASSWORD: fulus
+    ports:
+      - "3306:3306"
+    volumes:
+      - fulus_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      APP_URL: http://localhost:4000
+      DATABASE_URL: mysql://fulus:fulus@mysql:3306/fulus
+      JWT_SECRET: change-me-to-a-long-random-secret
+      JWT_EXPIRES_IN: 7d
+      ADMIN_API_KEY: fulus-admin-dev-key
+      SIMULATE_PROVIDERS: "1"
+      PAGOCARDS_BASE_URL: https://pagocards.com
+      BUSHA_BASE_URL: https://api.sandbox.busha.so
+      PREMBLY_BASE_URL: https://api.prembly.com
+      STROWALLET_BASE_URL: https://strowallet.com
+      ESIM_GO_BASE_URL: https://api.esim-go.com/v2.5
+
+volumes:
+  fulus_mysql:
