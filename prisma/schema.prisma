@@ -120,18 +120,24 @@ enum BeneficiaryType {
   FULUS_USER
 }
 
+enum EmailOtpPurpose {
+  SIGNUP
+  RESET
+}
+
 model User {
-  id           String     @id @default(cuid())
-  email        String     @unique
-  phone        String?    @unique
-  passwordHash String
-  firstName    String?
-  lastName     String?
-  status       UserStatus @default(ACTIVE)
-  kycStatus    KycStatus  @default(NOT_STARTED)
-  kycTier      Int        @default(0)
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  id              String     @id @default(cuid())
+  email           String     @unique
+  phone           String?    @unique
+  passwordHash    String
+  firstName       String?
+  lastName        String?
+  status          UserStatus @default(ACTIVE)
+  kycStatus       KycStatus  @default(NOT_STARTED)
+  kycTier         Int        @default(0)
+  emailVerifiedAt DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   wallets         Wallet[]
   kycChecks       KycCheck[]
@@ -151,6 +157,20 @@ model User {
 
   @@index([status])
   @@index([kycStatus])
+}
+
+model EmailOtp {
+  id         String          @id @default(cuid())
+  email      String
+  purpose    EmailOtpPurpose
+  codeHash   String
+  attempts   Int             @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime        @default(now())
+
+  @@index([email, purpose])
+  @@index([expiresAt])
 }
 
 model RefreshToken {

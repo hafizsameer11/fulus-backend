@@ -34,6 +34,8 @@ services:
       JWT_EXPIRES_IN: 7d
       ADMIN_API_KEY: fulus-admin-dev-key
       SIMULATE_PROVIDERS: "1"
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: "Fulus <onboarding@resend.dev>"
       PAGOCARDS_BASE_URL: https://pagocards.com
       BUSHA_BASE_URL: https://api.sandbox.busha.so
       PREMBLY_BASE_URL: https://api.prembly.com

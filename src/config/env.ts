@@ -29,6 +29,10 @@ const envSchema = z.object({
 
   ESIM_GO_BASE_URL: z.string().url().default("https://api.esim-go.com/v2.5"),
   ESIM_GO_API_KEY: z.string().optional().default(""),
+
+  /** Resend API key — required in production for OTP / reset emails */
+  RESEND_API_KEY: z.string().optional().default(""),
+  EMAIL_FROM: z.string().default("Fulus <onboarding@resend.dev>"),
 });
 
 const parsed = envSchema.safeParse(process.env);

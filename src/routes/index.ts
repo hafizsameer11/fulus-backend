@@ -33,6 +33,9 @@ apiRouter.get("/health", (_req, res) => {
 apiRouter.post("/auth/register", asyncHandler(authController.register));
 apiRouter.post("/auth/login", asyncHandler(authController.login));
 apiRouter.post("/auth/forgot-password", asyncHandler(authController.forgotPassword));
+apiRouter.post("/auth/verify-otp", asyncHandler(authController.verifyOtp));
+apiRouter.post("/auth/resend-otp", asyncHandler(authController.resendOtp));
+apiRouter.post("/auth/reset-password", asyncHandler(authController.resetPassword));
 
 apiRouter.get("/me", requireAuth, asyncHandler(usersController.me));
 apiRouter.patch("/me", requireAuth, asyncHandler(usersController.updateMe));

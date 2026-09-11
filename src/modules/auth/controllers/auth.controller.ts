@@ -1,6 +1,14 @@
 import type { Request, Response } from "express";
 import { created, ok } from "../../../lib/http.js";
-import { authService, forgotPasswordSchema, loginSchema, registerSchema } from "../services/auth.service.js";
+import {
+  authService,
+  forgotPasswordSchema,
+  loginSchema,
+  registerSchema,
+  resendOtpSchema,
+  resetPasswordSchema,
+  verifyOtpSchema,
+} from "../services/auth.service.js";
 
 export class AuthController {
   register = async (req: Request, res: Response) => {
@@ -17,6 +25,18 @@ export class AuthController {
 
   forgotPassword = async (req: Request, res: Response) => {
     return ok(res, await authService.forgotPassword(forgotPasswordSchema.parse(req.body)));
+  };
+
+  verifyOtp = async (req: Request, res: Response) => {
+    return ok(res, await authService.verifyOtp(verifyOtpSchema.parse(req.body)));
+  };
+
+  resendOtp = async (req: Request, res: Response) => {
+    return ok(res, await authService.resendOtp(resendOtpSchema.parse(req.body)));
+  };
+
+  resetPassword = async (req: Request, res: Response) => {
+    return ok(res, await authService.resetPassword(resetPasswordSchema.parse(req.body)));
   };
 }
 
