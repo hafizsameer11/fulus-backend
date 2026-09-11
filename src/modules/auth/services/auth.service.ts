@@ -152,6 +152,45 @@ export class AuthService {
   async register(input: z.infer<typeof registerSchema>) {
     const email = input.email.toLowerCase();
     const existing = await prisma.user.findUnique({ where: { email } });
+
+    // Incomplete signup: resume verification instead of blocking.
+    if (existing && !existing.emailVerifiedAt) {
+      if (existing.status !== "ACTIVE") {
+        throw new AppError("Account is not active", 403, "ACCOUNT_INACTIVE");
+      }
+      const passwordHash = await bcrypt.hash(input.password, 12);
+      const user = await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          passwordHash,
+          ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
+          ...(input.lastName !== undefined ? { lastName: input.lastName } : {}),
+          ...(input.phone !== undefined ? { phone: input.phone } : {}),
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          phone: true,
+          kycStatus: true,
+          kycTier: true,
+          status: true,
+          emailVerifiedAt: true,
+          createdAt: true,
+        },
+      });
+      const otp = await this.issueOtp(email, EmailOtpPurpose.SIGNUP);
+      const accessToken = signAccessToken({ id: user.id, email: user.email });
+      return {
+        user: publicUser(user),
+        accessToken,
+        requiresEmailVerification: true,
+        resumed: true,
+        otp,
+      };
+    }
+
     if (existing) throw new ConflictError("Email already registered");
 
     const passwordHash = await bcrypt.hash(input.password, 12);
