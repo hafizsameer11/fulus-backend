@@ -30,9 +30,17 @@ const envSchema = z.object({
   ESIM_GO_BASE_URL: z.string().url().default("https://api.esim-go.com/v2.5"),
   ESIM_GO_API_KEY: z.string().optional().default(""),
 
-  /** Resend API key — required in production for OTP / reset emails */
-  RESEND_API_KEY: z.string().optional().default(""),
-  EMAIL_FROM: z.string().default("Fulus <onboarding@resend.dev>"),
+  /** Custom SMTP (Hostinger, etc.) — required in production for OTP / reset emails */
+  SMTP_HOST: z.string().optional().default(""),
+  SMTP_PORT: z.coerce.number().default(465),
+  SMTP_SECURE: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
+  SMTP_USER: z.string().optional().default(""),
+  SMTP_PASS: z.string().optional().default(""),
+  EMAIL_FROM: z.string().default("Fulus <noreply@fulusapp.co>"),
 });
 
 const parsed = envSchema.safeParse(process.env);
