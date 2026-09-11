@@ -5,8 +5,6 @@ import { EmailOtpPurpose, WalletCurrency } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, ConflictError, UnauthorizedError } from "../../../lib/errors.js";
 import { signAccessToken } from "../../../middleware/auth.js";
-import { simulateProviders } from "../../../lib/simulate.js";
-import { walletService } from "../../wallet/services/wallet.service.js";
 import { emailConfigured, otpEmailContent, sendEmail } from "../../../lib/mailer.js";
 import { env } from "../../../config/env.js";
 
@@ -222,33 +220,6 @@ export class AuthService {
         createdAt: true,
       },
     });
-
-    if (simulateProviders()) {
-      await walletService.credit({
-        userId: user.id,
-        currency: "NGN",
-        amount: 500_000,
-        type: "ADJUSTMENT",
-        description: "Simulated welcome credit",
-        provider: "simulated",
-      });
-      await walletService.credit({
-        userId: user.id,
-        currency: "USD",
-        amount: 250,
-        type: "ADJUSTMENT",
-        description: "Simulated welcome credit",
-        provider: "simulated",
-      });
-      await walletService.credit({
-        userId: user.id,
-        currency: "SAR",
-        amount: 1_000,
-        type: "ADJUSTMENT",
-        description: "Simulated welcome credit",
-        provider: "simulated",
-      });
-    }
 
     const otp = await this.issueOtp(email, EmailOtpPurpose.SIGNUP);
     const accessToken = signAccessToken({ id: user.id, email: user.email });
