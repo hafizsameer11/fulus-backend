@@ -31,7 +31,7 @@ const BILL_SERVICES: Array<{
   { id: "mtn", category: "AIRTIME", name: "MTN", shortName: "MTN", logoKey: "mtn", providerCode: "mtn", accent: "#FFCC00" },
   { id: "airtel", category: "AIRTIME", name: "Airtel", shortName: "airtel", logoKey: "airtel", providerCode: "airtel", accent: "#ED1C24" },
   { id: "glo", category: "AIRTIME", name: "Glo", shortName: "glo", logoKey: "glo", providerCode: "glo", accent: "#00A650" },
-  { id: "9mobile", category: "AIRTIME", name: "9mobile", shortName: "9", logoKey: "9mobile", providerCode: "9mobile", accent: "#0F9D58" },
+  { id: "9mobile", category: "AIRTIME", name: "9mobile", shortName: "9", logoKey: "9mobile", providerCode: "etisalat", accent: "#0F9D58" },
   {
     id: "mtn-data",
     category: "DATA",
@@ -54,6 +54,34 @@ const BILL_SERVICES: Array<{
     logoKey: "airtel",
     providerCode: "airtel-data",
     accent: "#ED1C24",
+    variations: [
+      { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
+      { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },
+      { code: "5gb-30d", name: "5GB · 30 days", amount: 2500 },
+    ],
+  },
+  {
+    id: "glo-data",
+    category: "DATA",
+    name: "Glo Data",
+    shortName: "glo",
+    logoKey: "glo",
+    providerCode: "glo-data",
+    accent: "#00A650",
+    variations: [
+      { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
+      { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },
+      { code: "5gb-30d", name: "5GB · 30 days", amount: 2500 },
+    ],
+  },
+  {
+    id: "9mobile-data",
+    category: "DATA",
+    name: "9mobile Data",
+    shortName: "9",
+    logoKey: "9mobile",
+    providerCode: "etisalat-data",
+    accent: "#0F9D58",
     variations: [
       { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
       { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },

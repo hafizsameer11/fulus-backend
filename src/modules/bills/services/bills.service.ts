@@ -4,6 +4,7 @@ import { prisma } from "../../../lib/prisma.js";
 import { strowalletClient } from "../../../providers/strowallet/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { simRef, useStrowalletLive } from "../../../lib/simulate.js";
+import { AppError } from "../../../lib/errors.js";
 
 export const payBillSchema = z.object({
   category: z.enum(["AIRTIME", "DATA", "ELECTRICITY", "CABLE", "BETTING", "EDUCATION", "OTHER"]),
@@ -23,6 +24,44 @@ export const verifyMeterSchema = z.object({
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
+}
+
+/** Strowallet airtime: mtn | glo | airtel | etisalat */
+function airtimeServiceName(serviceId: string): string {
+  const id = serviceId.toLowerCase().replace(/-airtime$/, "");
+  if (id === "9mobile" || id === "etisalat") return "etisalat";
+  return id;
+}
+
+/** Strowallet data: mtn-data | airtel-data | glo-data | etisalat-data */
+function dataServiceId(serviceId: string): string {
+  const id = serviceId.toLowerCase();
+  if (id === "9mobile-data" || id === "etisalat-data") return "etisalat-data";
+  if (id.endsWith("-data")) return id;
+  if (id === "9mobile" || id === "etisalat") return "etisalat-data";
+  return `${id}-data`;
+}
+
+function extractToken(providerResult: unknown): string | undefined {
+  if (!providerResult || typeof providerResult !== "object") return undefined;
+  const root = providerResult as Record<string, unknown>;
+  const response = root.response && typeof root.response === "object" ? (root.response as Record<string, unknown>) : null;
+
+  const candidates = [
+    root.token,
+    root.Token,
+    root.purchased_code,
+    response?.Token,
+    response?.purchased_code,
+    root.data && typeof root.data === "object" ? (root.data as Record<string, unknown>).token : undefined,
+  ];
+
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) {
+      return c.replace(/^Token\s*:\s*/i, "").trim();
+    }
+  }
+  return undefined;
 }
 
 export class BillsService {
@@ -52,9 +91,15 @@ export class BillsService {
   }
 
   async verifyMeter(input: z.infer<typeof verifyMeterSchema>) {
+    const svc = await prisma.billService.findUnique({ where: { id: input.serviceID } });
+    const serviceName = svc?.providerCode ?? input.serviceID;
+
     if (!useStrowalletLive()) {
       return {
         simulated: true,
+        customer_name: "DEMO CUSTOMER",
+        address: "1 Admiralty Way, Lagos",
+        meter_number: input.billersCode,
         Customer_Name: "DEMO CUSTOMER",
         Address: "1 Admiralty Way, Lagos",
         Meter_Number: input.billersCode,
@@ -62,11 +107,22 @@ export class BillsService {
         Customer_District: "Ikeja",
       };
     }
-    return strowalletClient.verifyMeter(input);
+
+    return strowalletClient.verifyMeter({
+      meter_number: input.billersCode,
+      service_name: serviceName,
+      meter_type: input.type,
+    });
   }
 
   async pay(userId: string, input: z.infer<typeof payBillSchema>) {
     const phone = input.phone ?? input.customerRef;
+    const svc = await prisma.billService.findUnique({ where: { id: input.serviceId } });
+    const providerCode = svc?.providerCode ?? input.serviceId;
+
+    if (input.category === "BETTING") {
+      throw new AppError("Betting top-up is not available via Strowallet yet", 400, "UNSUPPORTED_BILL");
+    }
 
     const walletTx = await walletService.debit({
       userId,
@@ -83,11 +139,9 @@ export class BillsService {
 
       if (!useStrowalletLive()) {
         token =
-          input.category === "ELECTRICITY"
+          input.category === "ELECTRICITY" || input.category === "EDUCATION"
             ? `${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`
-            : input.category === "EDUCATION"
-              ? `${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`
-              : undefined;
+            : undefined;
         providerResult = {
           simulated: true,
           reference: simRef("BILL"),
@@ -100,14 +154,14 @@ export class BillsService {
             providerResult = await strowalletClient.buyAirtime({
               amount: input.amount,
               phone,
-              service_id: input.serviceId,
+              service_name: airtimeServiceName(providerCode),
             });
             break;
           case "DATA":
             providerResult = await strowalletClient.buyData({
               amount: input.amount,
               phone,
-              service_id: input.serviceId,
+              service_id: dataServiceId(providerCode),
               variation_code: input.variationCode ?? "",
             });
             break;
@@ -115,37 +169,33 @@ export class BillsService {
             providerResult = await strowalletClient.buyElectricity({
               amount: input.amount,
               phone,
-              serviceID: input.serviceId,
-              variation_code: (input.variationCode as "prepaid" | "postpaid") ?? "prepaid",
-              billersCode: input.customerRef,
+              service_name: providerCode,
+              meter_number: input.customerRef,
+              meter_type: (input.variationCode as "prepaid" | "postpaid") ?? "prepaid",
             });
             break;
           case "CABLE":
             providerResult = await strowalletClient.buyCable({
               amount: input.amount,
               phone,
-              serviceID: input.serviceId,
+              service_id: providerCode,
               variation_code: input.variationCode ?? "",
-              billersCode: input.customerRef,
+              customer_id: input.customerRef,
+            });
+            break;
+          case "EDUCATION":
+            providerResult = await strowalletClient.buyEducational({
+              amount: input.amount,
+              phone,
+              service_name: providerCode || "waec",
+              variation_code: input.variationCode ?? "waecdirect",
             });
             break;
           default:
-            providerResult = await strowalletClient.buyAirtime({
-              amount: input.amount,
-              phone,
-              service_id: input.serviceId,
-            });
+            throw new AppError(`Unsupported bill category: ${input.category}`, 400, "UNSUPPORTED_BILL");
         }
 
-        token =
-          providerResult &&
-          typeof providerResult === "object" &&
-          "data" in providerResult &&
-          providerResult.data &&
-          typeof providerResult.data === "object" &&
-          "token" in (providerResult.data as object)
-            ? String((providerResult.data as { token: unknown }).token)
-            : undefined;
+        token = extractToken(providerResult);
       }
 
       const payment = await prisma.billPayment.create({
