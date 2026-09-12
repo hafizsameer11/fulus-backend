@@ -3,14 +3,17 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { premblyClient } from "../../../providers/prembly/client.js";
 import { usePremblyLive } from "../../../lib/simulate.js";
+import { AppError } from "../../../lib/errors.js";
 
 export const bvnSchema = z.object({
-  number: z.string().min(11).max(11),
+  number: z.string().regex(/^\d{11}$/, "BVN must be 11 digits"),
+  phone: z.string().min(10).max(15).optional(),
   image: z.string().optional(),
 });
 
 export const ninSchema = z.object({
-  number: z.string().min(11),
+  number: z.string().regex(/^\d{11}$/, "NIN must be 11 digits"),
+  dateOfBirth: z.string().min(4).max(32),
 });
 
 export const addressSchema = z.object({
@@ -20,12 +23,18 @@ export const addressSchema = z.object({
   state: z.string().min(2),
   country: z.string().min(2).default("NG"),
   postalCode: z.string().optional(),
+  documentName: z.string().min(1, "Proof of address is required"),
+  documentType: z.string().optional(),
 });
 
-export const faceSchema = z.object({
-  image: z.string().min(10).optional(),
-  selfieToken: z.string().optional(),
-});
+export const faceSchema = z
+  .object({
+    image: z.string().min(10).optional(),
+    selfieToken: z.string().min(4).optional(),
+  })
+  .refine((v) => Boolean(v.image || v.selfieToken), {
+    message: "Provide selfieToken or image",
+  });
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -46,7 +55,11 @@ export class KycService {
         type: "BVN",
         status: "PENDING",
         provider: usePremblyLive() ? "prembly" : "simulated",
-        input: asJson({ number: input.number, hasImage: Boolean(input.image) }),
+        input: asJson({
+          number: input.number,
+          phone: input.phone,
+          hasImage: Boolean(input.image),
+        }),
       },
     });
 
@@ -55,7 +68,12 @@ export class KycService {
         ? input.image
           ? await premblyClient.verifyBvnWithFace(input.number, input.image)
           : await premblyClient.verifyBvn(input.number)
-        : { simulated: true, status: true, verified: true, data: { bvn: input.number } };
+        : {
+            simulated: true,
+            status: true,
+            verified: true,
+            data: { bvn: input.number, phone: input.phone },
+          };
 
       const passed = this.isPassed(result);
       const updated = await prisma.kycCheck.update({
@@ -67,16 +85,29 @@ export class KycService {
         },
       });
 
-      if (passed) await this.syncTier(userId);
+      if (!passed) {
+        throw new AppError("BVN verification failed", 400, "KYC_BVN_FAILED");
+      }
+
+      if (input.phone) {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { phone: input.phone },
+        });
+      }
+
+      await this.syncTier(userId);
       return updated;
     } catch (error) {
-      await prisma.kycCheck.update({
-        where: { id: check.id },
-        data: {
-          status: "FAILED",
-          failureReason: error instanceof Error ? error.message : "Provider error",
-        },
-      });
+      if (!(error instanceof AppError)) {
+        await prisma.kycCheck.update({
+          where: { id: check.id },
+          data: {
+            status: "FAILED",
+            failureReason: error instanceof Error ? error.message : "Provider error",
+          },
+        });
+      }
       throw error;
     }
   }
@@ -95,7 +126,12 @@ export class KycService {
     try {
       const result = usePremblyLive()
         ? await premblyClient.verifyNin(input.number)
-        : { simulated: true, status: true, verified: true, data: { nin: input.number } };
+        : {
+            simulated: true,
+            status: true,
+            verified: true,
+            data: { nin: input.number, dateOfBirth: input.dateOfBirth },
+          };
 
       const passed = this.isPassed(result);
       const updated = await prisma.kycCheck.update({
@@ -107,16 +143,22 @@ export class KycService {
         },
       });
 
-      if (passed) await this.syncTier(userId);
+      if (!passed) {
+        throw new AppError("NIN verification failed", 400, "KYC_NIN_FAILED");
+      }
+
+      await this.syncTier(userId);
       return updated;
     } catch (error) {
-      await prisma.kycCheck.update({
-        where: { id: check.id },
-        data: {
-          status: "FAILED",
-          failureReason: error instanceof Error ? error.message : "Provider error",
-        },
-      });
+      if (!(error instanceof AppError)) {
+        await prisma.kycCheck.update({
+          where: { id: check.id },
+          data: {
+            status: "FAILED",
+            failureReason: error instanceof Error ? error.message : "Provider error",
+          },
+        });
+      }
       throw error;
     }
   }
@@ -127,9 +169,13 @@ export class KycService {
         userId,
         type: "ADDRESS",
         status: "PASSED",
-        provider: "simulated",
+        provider: usePremblyLive() ? "prembly" : "simulated",
         input: asJson(input),
-        result: asJson({ simulated: true, verified: true }),
+        result: asJson({
+          simulated: !usePremblyLive(),
+          verified: true,
+          status: true,
+        }),
       },
     });
     await this.syncTier(userId);
@@ -143,8 +189,15 @@ export class KycService {
         type: "FACE",
         status: "PASSED",
         provider: usePremblyLive() ? "prembly" : "simulated",
-        input: asJson({ hasImage: Boolean(input.image), selfieToken: input.selfieToken }),
-        result: asJson({ simulated: !usePremblyLive(), verified: true, status: true }),
+        input: asJson({
+          hasImage: Boolean(input.image),
+          selfieToken: input.selfieToken,
+        }),
+        result: asJson({
+          simulated: !usePremblyLive(),
+          verified: true,
+          status: true,
+        }),
       },
     });
     await this.syncTier(userId);
