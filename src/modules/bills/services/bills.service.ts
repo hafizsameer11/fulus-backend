@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { strowalletClient } from "../../../providers/strowallet/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
-import { simRef, useStrowalletLive } from "../../../lib/simulate.js";
+import { useStrowalletLive } from "../../../lib/simulate.js";
 import { AppError } from "../../../lib/errors.js";
 
 export const payBillSchema = z.object({
@@ -21,6 +21,14 @@ export const verifyMeterSchema = z.object({
   serviceID: z.string().min(1),
   type: z.enum(["prepaid", "postpaid"]),
 });
+
+type CatalogVariation = {
+  id?: string;
+  code: string;
+  name: string;
+  amount: number | null;
+  isActive: boolean;
+};
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -64,6 +72,41 @@ function extractToken(providerResult: unknown): string | undefined {
   return undefined;
 }
 
+function asPlanList(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== "object") return [];
+  const root = raw as Record<string, unknown>;
+  if (Array.isArray(root.data)) return root.data;
+  if (Array.isArray(root.plans)) return root.plans;
+  if (Array.isArray(root.variations)) return root.variations;
+  if (root.data && typeof root.data === "object") {
+    const data = root.data as Record<string, unknown>;
+    if (Array.isArray(data.variations)) return data.variations;
+    if (Array.isArray(data.plans)) return data.plans;
+  }
+  return [];
+}
+
+function normalizeProviderPlans(raw: unknown): CatalogVariation[] {
+  const out: CatalogVariation[] = [];
+  for (const row of asPlanList(raw)) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    const code = String(r.variation_code ?? r.variationCode ?? r.code ?? r.plan_code ?? r.planCode ?? "").trim();
+    const name = String(r.name ?? r.plan_name ?? r.planName ?? r.description ?? code).trim();
+    if (!code || !name) continue;
+    const amountRaw = r.variation_amount ?? r.variationAmount ?? r.amount ?? r.price ?? r.fixedPrice;
+    const amount = amountRaw == null || amountRaw === "" ? null : Number(amountRaw);
+    out.push({
+      code,
+      name,
+      amount: Number.isFinite(amount as number) ? (amount as number) : null,
+      isActive: true,
+    });
+  }
+  return out;
+}
+
 export class BillsService {
   async list(userId: string) {
     return prisma.billPayment.findMany({
@@ -72,8 +115,12 @@ export class BillsService {
     });
   }
 
+  /**
+   * Catalog for the app. Never returns DB seed/demo plan lists.
+   * DATA/CABLE variations come from Strowallet when live; otherwise empty.
+   */
   async catalog(category?: string) {
-    return prisma.billService.findMany({
+    const rows = await prisma.billService.findMany({
       where: {
         isActive: true,
         ...(category ? { category: category as never } : {}),
@@ -81,6 +128,39 @@ export class BillsService {
       include: { variations: { where: { isActive: true } } },
       orderBy: { name: "asc" },
     });
+
+    const live = useStrowalletLive();
+
+    return Promise.all(
+      rows.map(async (svc) => {
+        if (svc.category === "AIRTIME" || svc.category === "ELECTRICITY" || svc.category === "BETTING") {
+          return { ...svc, variations: [] as CatalogVariation[] };
+        }
+
+        if (!live) {
+          // Do not surface seeded 1GB/Compact/etc. demo rows.
+          return { ...svc, variations: [] as CatalogVariation[] };
+        }
+
+        try {
+          if (svc.category === "DATA") {
+            const plans = normalizeProviderPlans(
+              await strowalletClient.getDataPlans(dataServiceId(svc.providerCode ?? svc.id)),
+            );
+            return { ...svc, variations: plans };
+          }
+          if (svc.category === "CABLE") {
+            const plans = normalizeProviderPlans(await strowalletClient.getCablePlans(svc.providerCode ?? svc.id));
+            return { ...svc, variations: plans };
+          }
+        } catch {
+          return { ...svc, variations: [] as CatalogVariation[] };
+        }
+
+        // EDUCATION / OTHER — no seeded amounts
+        return { ...svc, variations: [] as CatalogVariation[] };
+      }),
+    );
   }
 
   async getService(id: string) {
@@ -91,22 +171,12 @@ export class BillsService {
   }
 
   async verifyMeter(input: z.infer<typeof verifyMeterSchema>) {
+    if (!useStrowalletLive()) {
+      throw new AppError("Meter verification requires a live bill provider", 503, "PROVIDER_UNAVAILABLE");
+    }
+
     const svc = await prisma.billService.findUnique({ where: { id: input.serviceID } });
     const serviceName = svc?.providerCode ?? input.serviceID;
-
-    if (!useStrowalletLive()) {
-      return {
-        simulated: true,
-        customer_name: "DEMO CUSTOMER",
-        address: "1 Admiralty Way, Lagos",
-        meter_number: input.billersCode,
-        Customer_Name: "DEMO CUSTOMER",
-        Address: "1 Admiralty Way, Lagos",
-        Meter_Number: input.billersCode,
-        Min_Purchase_Amount: 500,
-        Customer_District: "Ikeja",
-      };
-    }
 
     return strowalletClient.verifyMeter({
       meter_number: input.billersCode,
@@ -124,79 +194,69 @@ export class BillsService {
       throw new AppError("Betting top-up is not available via Strowallet yet", 400, "UNSUPPORTED_BILL");
     }
 
+    if (!useStrowalletLive()) {
+      throw new AppError("Bill payments require a live provider — demo/seed checkout is disabled", 503, "PROVIDER_UNAVAILABLE");
+    }
+
     const walletTx = await walletService.debit({
       userId,
       currency: input.currency,
       amount: input.amount,
       type: "BILL_PAYMENT",
       description: `${input.category} ${input.serviceId}`,
-      provider: useStrowalletLive() ? "strowallet" : "simulated",
+      provider: "strowallet",
     });
 
     try {
       let providerResult: unknown;
-      let token: string | undefined;
 
-      if (!useStrowalletLive()) {
-        token =
-          input.category === "ELECTRICITY" || input.category === "EDUCATION"
-            ? `${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`
-            : undefined;
-        providerResult = {
-          simulated: true,
-          reference: simRef("BILL"),
-          status: "success",
-          data: { token },
-        };
-      } else {
-        switch (input.category) {
-          case "AIRTIME":
-            providerResult = await strowalletClient.buyAirtime({
-              amount: input.amount,
-              phone,
-              service_name: airtimeServiceName(providerCode),
-            });
-            break;
-          case "DATA":
-            providerResult = await strowalletClient.buyData({
-              amount: input.amount,
-              phone,
-              service_id: dataServiceId(providerCode),
-              variation_code: input.variationCode ?? "",
-            });
-            break;
-          case "ELECTRICITY":
-            providerResult = await strowalletClient.buyElectricity({
-              amount: input.amount,
-              phone,
-              service_name: providerCode,
-              meter_number: input.customerRef,
-              meter_type: (input.variationCode as "prepaid" | "postpaid") ?? "prepaid",
-            });
-            break;
-          case "CABLE":
-            providerResult = await strowalletClient.buyCable({
-              amount: input.amount,
-              phone,
-              service_id: providerCode,
-              variation_code: input.variationCode ?? "",
-              customer_id: input.customerRef,
-            });
-            break;
-          case "EDUCATION":
-            providerResult = await strowalletClient.buyEducational({
-              amount: input.amount,
-              phone,
-              service_name: providerCode || "waec",
-              variation_code: input.variationCode ?? "waecdirect",
-            });
-            break;
-          default:
-            throw new AppError(`Unsupported bill category: ${input.category}`, 400, "UNSUPPORTED_BILL");
-        }
-
-        token = extractToken(providerResult);
+      switch (input.category) {
+        case "AIRTIME":
+          providerResult = await strowalletClient.buyAirtime({
+            amount: input.amount,
+            phone,
+            service_name: airtimeServiceName(providerCode),
+          });
+          break;
+        case "DATA":
+          providerResult = await strowalletClient.buyData({
+            amount: input.amount,
+            phone,
+            service_id: dataServiceId(providerCode),
+            variation_code: input.variationCode ?? "",
+          });
+          break;
+        case "ELECTRICITY":
+          providerResult = await strowalletClient.buyElectricity({
+            amount: input.amount,
+            phone,
+            service_name: providerCode,
+            meter_number: input.customerRef,
+            meter_type: (input.variationCode as "prepaid" | "postpaid") ?? "prepaid",
+          });
+          break;
+        case "CABLE":
+          providerResult = await strowalletClient.buyCable({
+            amount: input.amount,
+            phone,
+            service_id: providerCode,
+            variation_code: input.variationCode ?? "",
+            customer_id: input.customerRef,
+          });
+          break;
+        case "EDUCATION":
+          providerResult = await strowalletClient.buyEducational({
+            amount: input.amount,
+            phone,
+            service_name: providerCode || "waec",
+            variation_code: input.variationCode ?? "waecdirect",
+          });
+          break;
+        default:
+          throw new AppError(`Unsupported bill category: ${input.category}`, 400, "UNSUPPORTED_BILL");
       }
+
+      const token = extractToken(providerResult);
 
       const payment = await prisma.billPayment.create({
         data: {
@@ -208,7 +268,7 @@ export class BillsService {
           variationCode: input.variationCode,
           amount: input.amount,
           phone,
-          provider: useStrowalletLive() ? "strowallet" : "simulated",
+          provider: "strowallet",
           status: "SUCCESS",
           token,
           providerPayload: asJson(providerResult),

@@ -40,11 +40,6 @@ const BILL_SERVICES: Array<{
     logoKey: "mtn",
     providerCode: "mtn-data",
     accent: "#FFCC00",
-    variations: [
-      { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
-      { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },
-      { code: "5gb-30d", name: "5GB · 30 days", amount: 2500 },
-    ],
   },
   {
     id: "airtel-data",
@@ -54,11 +49,6 @@ const BILL_SERVICES: Array<{
     logoKey: "airtel",
     providerCode: "airtel-data",
     accent: "#ED1C24",
-    variations: [
-      { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
-      { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },
-      { code: "5gb-30d", name: "5GB · 30 days", amount: 2500 },
-    ],
   },
   {
     id: "glo-data",
@@ -68,11 +58,6 @@ const BILL_SERVICES: Array<{
     logoKey: "glo",
     providerCode: "glo-data",
     accent: "#00A650",
-    variations: [
-      { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
-      { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },
-      { code: "5gb-30d", name: "5GB · 30 days", amount: 2500 },
-    ],
   },
   {
     id: "9mobile-data",
@@ -82,11 +67,6 @@ const BILL_SERVICES: Array<{
     logoKey: "9mobile",
     providerCode: "etisalat-data",
     accent: "#0F9D58",
-    variations: [
-      { code: "1gb-30d", name: "1GB · 30 days", amount: 500 },
-      { code: "2gb-30d", name: "2GB · 30 days", amount: 1000 },
-      { code: "5gb-30d", name: "5GB · 30 days", amount: 2500 },
-    ],
   },
   { id: "ikedc", category: "ELECTRICITY", name: "Ikeja Electric", shortName: "IKEDC", logoKey: "ikedc", providerCode: "ikeja-electric", accent: "#F7941E" },
   { id: "ekedc", category: "ELECTRICITY", name: "Eko Electric", shortName: "EKEDC", logoKey: "ekedc", providerCode: "eko-electric", accent: "#8E24AA" },
@@ -99,10 +79,6 @@ const BILL_SERVICES: Array<{
     logoKey: "dstv",
     providerCode: "dstv",
     accent: "#0033A0",
-    variations: [
-      { code: "compact", name: "Compact", amount: 19000 },
-      { code: "premium", name: "Premium", amount: 44500 },
-    ],
   },
   {
     id: "gotv",
@@ -112,10 +88,6 @@ const BILL_SERVICES: Array<{
     logoKey: "gotv",
     providerCode: "gotv",
     accent: "#00A651",
-    variations: [
-      { code: "jolli", name: "Jolli", amount: 4850 },
-      { code: "max", name: "Max", amount: 7200 },
-    ],
   },
   {
     id: "startimes",
@@ -125,7 +97,6 @@ const BILL_SERVICES: Array<{
     logoKey: "startimes",
     providerCode: "startimes",
     accent: "#F26522",
-    variations: [{ code: "classic", name: "Classic", amount: 5100 }],
   },
   { id: "bet9ja", category: "BETTING", name: "Bet9ja", shortName: "Bet9ja", logoKey: "bet9ja", providerCode: "bet9ja", accent: "#00A651" },
   { id: "sportybet", category: "BETTING", name: "SportyBet", shortName: "SportyBet", logoKey: "sportybet", providerCode: "sportybet", accent: "#E31E24" },
@@ -143,7 +114,6 @@ const BILL_SERVICES: Array<{
     logoKey: "waec",
     providerCode: "waec",
     accent: "#7C3AED",
-    variations: [{ code: "scratch-card", name: "Result Checker", amount: 3400 }],
   },
 ];
 
@@ -214,7 +184,12 @@ async function main() {
     }
   }
 
-  console.log(`Seeded ${FX_SEED.length} FX rates and ${BILL_SERVICES.length} bill services`);
+  // Retire old demo plan rows (1GB/Compact/etc.) so they never reappear in raw DB reads.
+  await prisma.billVariation.updateMany({
+    data: { isActive: false },
+  });
+
+  console.log(`Seeded ${FX_SEED.length} FX rates and ${BILL_SERVICES.length} bill services (no demo plan amounts)`);
 }
 
 main()
