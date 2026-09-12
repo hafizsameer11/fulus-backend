@@ -2,7 +2,6 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
-import { simulateProviders } from "../../../lib/simulate.js";
 
 export const updateProfileSchema = z.object({
   firstName: z.string().min(1).optional(),
@@ -73,35 +72,11 @@ export class UsersService {
   }
 
   async listInbox(userId: string) {
-    let rows = await prisma.inboxMessage.findMany({
+    return prisma.inboxMessage.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
-    if (!rows.length && simulateProviders()) {
-      await prisma.inboxMessage.createMany({
-        data: [
-          {
-            userId,
-            title: "Welcome to Fulus",
-            body: "Your NGN, USD and SAR wallets are ready. Swap at admin FX rates anytime.",
-            category: "system",
-          },
-          {
-            userId,
-            title: "Providers in simulation mode",
-            body: "Cards, bills, crypto and eSIM succeed locally until live provider keys are configured.",
-            category: "system",
-          },
-        ],
-      });
-      rows = await prisma.inboxMessage.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      });
-    }
-    return rows;
   }
 
   async markInboxRead(userId: string, id: string) {
