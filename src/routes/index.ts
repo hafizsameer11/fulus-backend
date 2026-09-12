@@ -45,6 +45,7 @@ apiRouter.post("/inbox/:id/read", requireAuth, asyncHandler(usersController.mark
 
 apiRouter.get("/wallets", requireAuth, asyncHandler(walletController.list));
 apiRouter.get("/wallets/deposit/bank/accounts", requireAuth, asyncHandler(depositsController.virtualAccount));
+apiRouter.post("/wallets/demo-credit", requireAuth, asyncHandler(walletController.demoCredit));
 apiRouter.get("/wallets/:currency", requireAuth, asyncHandler(walletController.getOne));
 apiRouter.get("/transactions", requireAuth, asyncHandler(walletController.transactions));
 apiRouter.get("/transactions/:id", requireAuth, asyncHandler(walletController.getTransaction));
