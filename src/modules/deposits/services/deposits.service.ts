@@ -1,12 +1,13 @@
 import { z } from "zod";
-import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { AppError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import { walletService } from "../../wallet/services/wallet.service.js";
 
 export const createDepositSchema = z.object({
   currency: z.enum(["NGN"]).default("NGN"),
-  amount: z.number().positive().optional(),
+  /** Required — no live bank yet, so we settle a mock credit immediately. */
+  amount: z.number().positive().max(5_000_000),
 });
 
 function vaNumber(userId: string) {
@@ -37,90 +38,93 @@ export class DepositsService {
     });
   }
 
+  /**
+   * Mock bank deposit: credits the user's NGN wallet immediately and returns
+   * a real wallet transaction (no external bank / VA webhook yet).
+   */
   async createBankDeposit(userId: string, input: z.infer<typeof createDepositSchema>) {
     if (input.currency !== "NGN") {
       throw new AppError("USD and SAR are virtual — fund via swap from NGN", 400, "VIRTUAL_CURRENCY");
     }
 
     const va = await this.ensureVirtualAccount(userId);
+    const reference = makeReference("DEP");
+
+    const transaction = await walletService.credit({
+      userId,
+      currency: "NGN",
+      amount: input.amount,
+      type: "DEPOSIT",
+      description: `Mock bank deposit · ${va.bankName}`,
+      provider: "mock",
+      providerRef: reference,
+      metadata: {
+        mock: true,
+        bankName: va.bankName,
+        accountNumber: va.accountNumber,
+      },
+    });
+
     const deposit = await prisma.deposit.create({
       data: {
         userId,
         method: "VIRTUAL_ACCOUNT",
         currency: "NGN",
         amount: input.amount,
-        status: "PENDING",
-        provider: "fulus",
+        status: "SUCCESS",
+        provider: "mock",
+        transactionId: transaction.id,
+        confirmedAt: new Date(),
         instructions: {
           bankName: va.bankName,
           accountName: va.accountName,
           accountNumber: va.accountNumber,
           bankCode: va.bankCode,
-          reference: makeReference("DEP"),
+          reference,
+          mock: true,
         },
       },
     });
 
-    return { deposit, virtualAccount: va };
+    return { deposit, transaction, virtualAccount: va, mock: true };
   }
 
   async list(userId: string) {
     return prisma.deposit.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
   }
 
-  /** Dev/admin helper: confirm a pending NGN deposit and credit available balance. */
+  /**
+   * Admin helper kept for older pending rows — settles with a real credit.
+   */
   async confirm(depositId: string, amount?: number) {
     const deposit = await prisma.deposit.findUnique({ where: { id: depositId } });
-    if (!deposit) throw new NotFoundError("Deposit not found");
+    if (!deposit) throw new AppError("Deposit not found", 404, "NOT_FOUND");
     if (deposit.status !== "PENDING") throw new AppError("Deposit already settled");
 
-    const creditAmount = new Prisma.Decimal(amount ?? deposit.amount ?? 0);
-    if (creditAmount.lte(0)) throw new AppError("Amount required to confirm deposit");
+    const creditAmount = Number(amount ?? deposit.amount ?? 0);
+    if (!(creditAmount > 0)) throw new AppError("Amount required to confirm deposit");
 
-    return prisma.$transaction(async (tx) => {
-      const wallet = await tx.wallet.findUnique({
-        where: { userId_currency: { userId: deposit.userId, currency: deposit.currency } },
-      });
-      if (!wallet) throw new NotFoundError("Wallet not found");
-
-      const balanceAfter = new Prisma.Decimal(wallet.available).plus(creditAmount);
-      const transaction = await tx.transaction.create({
-        data: {
-          userId: deposit.userId,
-          type: "DEPOSIT",
-          status: "SUCCESS",
-          amount: creditAmount,
-          currency: deposit.currency,
-          reference: makeReference("DEP"),
-          description: "Bank deposit confirmed",
-          provider: "fulus",
-        },
-      });
-
-      await tx.wallet.update({ where: { id: wallet.id }, data: { available: balanceAfter } });
-      await tx.ledgerEntry.create({
-        data: {
-          walletId: wallet.id,
-          transactionId: transaction.id,
-          type: "CREDIT",
-          amount: creditAmount,
-          balanceAfter,
-          description: "Bank deposit",
-        },
-      });
-
-      const updated = await tx.deposit.update({
-        where: { id: deposit.id },
-        data: {
-          status: "SUCCESS",
-          amount: creditAmount,
-          transactionId: transaction.id,
-          confirmedAt: new Date(),
-        },
-      });
-
-      return { deposit: updated, transaction };
+    const transaction = await walletService.credit({
+      userId: deposit.userId,
+      currency: deposit.currency,
+      amount: creditAmount,
+      type: "DEPOSIT",
+      description: "Bank deposit confirmed",
+      provider: "mock",
     });
+
+    const updated = await prisma.deposit.update({
+      where: { id: deposit.id },
+      data: {
+        status: "SUCCESS",
+        amount: creditAmount,
+        transactionId: transaction.id,
+        confirmedAt: new Date(),
+        provider: "mock",
+      },
+    });
+
+    return { deposit: updated, transaction, mock: true };
   }
 }
 

@@ -3,7 +3,6 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
-import { premblyClient } from "../../../providers/prembly/client.js";
 
 export const beneficiarySchema = z.object({
   type: z.enum(["BANK", "CRYPTO", "BILLER", "FULUS_USER"]),
@@ -83,21 +82,19 @@ export class TransfersService {
   }
 
   async resolveAccount(input: z.infer<typeof resolveSchema>) {
-    try {
-      const result = await premblyClient.verifyBankAccount(input.accountNumber, input.bankCode);
-      return { provider: "prembly", data: result };
-    } catch {
-      const bank = NG_BANKS.find((b) => b.code === input.bankCode);
-      return {
-        provider: "mock",
-        data: {
-          account_number: input.accountNumber,
-          account_name: "Fulus Test Account",
-          bank_code: input.bankCode,
-          bank_name: bank?.name ?? "Unknown Bank",
-        },
-      };
-    }
+    // No live bank name enquiry yet — always return an in-system mock resolve.
+    const bank = NG_BANKS.find((b) => b.code === input.bankCode);
+    const last4 = input.accountNumber.slice(-4);
+    return {
+      provider: "mock",
+      data: {
+        account_number: input.accountNumber,
+        account_name: `FULUS MOCK / ${last4}`,
+        bank_code: input.bankCode,
+        bank_name: bank?.name ?? "Unknown Bank",
+        mock: true,
+      },
+    };
   }
 
   async transferFulus(userId: string, input: z.infer<typeof fulusTransferSchema>) {
@@ -232,9 +229,16 @@ export class TransfersService {
           fee,
           currency: "NGN",
           reference: makeReference("BNK"),
-          description: input.narration ?? `Bank transfer to ${input.accountNumber}`,
+          description: input.narration ?? `Mock bank transfer to ${input.accountNumber}`,
           idempotencyKey: input.idempotencyKey,
-          provider: "fulus",
+          provider: "mock",
+          metadata: {
+            mock: true,
+            accountName: input.accountName,
+            accountNumber: input.accountNumber,
+            bankCode: input.bankCode,
+            bankName: input.bankName,
+          },
         },
       });
 
@@ -262,12 +266,12 @@ export class TransfersService {
           bankCode: input.bankCode,
           bankName: input.bankName,
           narration: input.narration,
-          provider: "fulus",
+          provider: "mock",
           status: "SUCCESS",
         },
       });
 
-      return { transaction, transfer };
+      return { transaction, transfer, mock: true };
     });
   }
 
