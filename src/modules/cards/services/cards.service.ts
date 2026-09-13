@@ -15,7 +15,7 @@ export const createCardSchema = z.object({
 });
 
 export const fundCardSchema = z.object({
-  /** Amount that lands on the card (Pagocards takes $1 + 2% on top from merchant wallet). */
+  /** Amount that lands on the card (Pagocards takes $0.15 + 0.75% on top from merchant wallet). */
   amount: z.number().positive(),
   currency: z.enum(["USD", "NGN", "SAR"]).default("USD"),
 });
@@ -173,7 +173,7 @@ export class CardsService {
     const loadFee = pagoVisaFundFeeUsd(input.amount);
     const debitTotal = pagoVisaFundDebitUsd(input.amount);
 
-    // User pays card amount + Pagocards load fee ($1 + 2%); only `amount` is loaded on-card.
+    // User pays card amount + Pagocards load fee ($0.15 + 0.75%); only `amount` is loaded on-card.
     const walletTx = await walletService.debit({
       userId,
       currency: input.currency,
@@ -185,7 +185,7 @@ export class CardsService {
       metadata: {
         cardAmount: input.amount,
         loadFeeUsd: loadFee,
-        feeFormula: "$1 + 2%",
+        feeFormula: "$0.15 + 0.75%",
       },
     });
 

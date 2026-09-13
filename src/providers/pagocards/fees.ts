@@ -1,23 +1,23 @@
 /**
- * Pagocards Visa 493 BIN (`us_493_visa_bin`) published fees.
- * Source of truth: https://pagocards.com/fees (VisaCard)
- * Docs also note initial loading and fund fees: https://pagocards.com/documentation
- *
- * Note: documentation text sometimes cites fund fee as "$1 + 1%"; the public
- * fees page and Visa launch pricing list "$1 + 2%". We follow the fees page.
+ * Pagocards 493-BIN Visa (`us_493_visa_bin`) published fees.
+ * Source: https://pagocards.com/fees (XXX-BIN SERIES → 493-BIN)
+ * Create/fund mins: https://pagocards.com/documentation#v1-cards-create
  */
 export const PAGO_VISA = {
-  /** Charged by Pagocards on each new Visa card */
-  issuanceFeeUsd: 4,
-  /** Minimum amount that must land on the card at first fund (our BIN) */
+  /** Card issuance — 493-BIN */
+  issuanceFeeUsd: 0.65,
+  /**
+   * Minimum top-up via POST /api/v1/cards/{id}/fund.
+   * (Create-time `initial_load`, if used, has a separate $10 minimum.)
+   */
   minInitialFundUsd: 5,
-  /** Flat portion of every card load */
-  fundFeeFlatUsd: 1,
-  /** Percent portion of every card load (2% → 0.02) */
-  fundFeeRate: 0.02,
+  /** Flat portion of every card load — 493-BIN */
+  fundFeeFlatUsd: 0.15,
+  /** Percent portion of every card load (0.75% → 0.0075) */
+  fundFeeRate: 0.0075,
 } as const;
 
-/** Load fee Pagocards takes from the merchant visa wallet when funding `amount`. */
+/** Load fee Pagocards takes from the merchant wallet when funding `amount`. */
 export function pagoVisaFundFeeUsd(amount: number): number {
   const fee = PAGO_VISA.fundFeeFlatUsd + amount * PAGO_VISA.fundFeeRate;
   return Math.round(fee * 100) / 100;
