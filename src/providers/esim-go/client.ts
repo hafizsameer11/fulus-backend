@@ -47,6 +47,10 @@ export class EsimGoClient {
     return this.request("/catalogue", { query });
   }
 
+  getCatalogueBundle(name: string) {
+    return this.request(`/catalogue/bundle/${encodeURIComponent(name)}`);
+  }
+
   validateOrder(input: { item: string; quantity?: number }) {
     return this.request("/orders", {
       method: "POST",
