@@ -97,6 +97,7 @@ export class PagocardsClient {
 
   blockVisaCard(input: { card_id: string }) {
     return this.request(`/api/v1/cards/${encodeURIComponent(input.card_id)}/block`, {
+      method: "POST",
       idempotent: true,
       idempotencyLabel: "block_card",
     });
@@ -104,6 +105,7 @@ export class PagocardsClient {
 
   unblockVisaCard(input: { card_id: string }) {
     return this.request(`/api/v1/cards/${encodeURIComponent(input.card_id)}/unblock`, {
+      method: "POST",
       idempotent: true,
       idempotencyLabel: "unblock_card",
     });
@@ -111,6 +113,7 @@ export class PagocardsClient {
 
   terminateCard(input: { card_id: string }) {
     return this.request(`/api/v1/cards/${encodeURIComponent(input.card_id)}/terminate`, {
+      method: "POST",
       idempotent: true,
       idempotencyLabel: "terminate_card",
     });
