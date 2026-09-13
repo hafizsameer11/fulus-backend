@@ -12,7 +12,8 @@ export const createCardSchema = z.object({
 });
 
 export const fundCardSchema = z.object({
-  amount: z.number().positive(),
+  /** Pagocards Visa fund minimum is $5 */
+  amount: z.number().min(5, "Minimum card fund is $5"),
   currency: z.enum(["USD", "NGN", "SAR"]).default("USD"),
 });
 
@@ -227,11 +228,28 @@ export class CardsService {
 
   async setLimits(userId: string, cardId: string, input: z.infer<typeof limitsCardSchema>) {
     const card = await this.get(userId, cardId);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError("User not found");
+
+    if (usePagocardsLive()) {
+      if (!card.providerCardId) throw new AppError("Card is not ready for spend controls");
+      await pagocardsClient.setSpendControls({
+        cardid: card.providerCardId,
+        email: user.email,
+        ...(input.perTxLimit != null ? { single_transaction: String(input.perTxLimit) } : {}),
+        ...(input.dailyLimit != null ? { daily: String(input.dailyLimit) } : {}),
+        ...(input.monthlyLimit != null ? { monthly: String(input.monthlyLimit) } : {}),
+      });
+    }
+
     return prisma.card.update({
       where: { id: card.id },
       data: {
         providerPayload: asJson({
           ...payloadOf(card),
+          dailyLimit: input.dailyLimit ?? null,
+          monthlyLimit: input.monthlyLimit ?? null,
+          perTxLimit: input.perTxLimit ?? null,
           limits: {
             dailyLimit: input.dailyLimit ?? null,
             monthlyLimit: input.monthlyLimit ?? null,
