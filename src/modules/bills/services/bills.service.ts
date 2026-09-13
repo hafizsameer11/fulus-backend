@@ -52,24 +52,100 @@ function dataServiceId(serviceId: string): string {
   return `${id}-data`;
 }
 
+function digRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function cleanTokenValue(raw: string): string | undefined {
+  let t = raw.trim();
+  if (!t) return undefined;
+  t = t.replace(/^Token\s*:?\s*/i, "").trim();
+  // Prefer digit runs (ignore prose around the token)
+  const match = t.match(/(\d[\d\s-]{6,}\d)/);
+  if (match?.[1]) t = match[1].replace(/[\s-]/g, "");
+  else t = t.replace(/[\s-]/g, "");
+  if (!/^\d{8,}$/.test(t)) return undefined;
+  return t;
+}
+
+/** Format prepaid token as XXXX-XXXX-XXXX for meter entry UI. */
+export function formatRechargeToken(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 8) return raw.trim();
+  return digits.replace(/(.{4})/g, "$1-").replace(/-$/, "");
+}
+
 function extractToken(providerResult: unknown): string | undefined {
   if (!providerResult || typeof providerResult !== "object") return undefined;
-  const root = providerResult as Record<string, unknown>;
-  const response = root.response && typeof root.response === "object" ? (root.response as Record<string, unknown>) : null;
+  const root = digRecord(providerResult)!;
+  const response = digRecord(root.response);
+  const data = digRecord(root.data);
+  const content = digRecord(response?.content);
+  const transactions = digRecord(content?.transactions);
 
-  const candidates = [
+  const candidates: unknown[] = [
     root.token,
     root.Token,
     root.purchased_code,
+    root.purchasedCode,
     response?.Token,
+    response?.token,
     response?.purchased_code,
-    root.data && typeof root.data === "object" ? (root.data as Record<string, unknown>).token : undefined,
+    response?.purchasedCode,
+    data?.token,
+    data?.Token,
+    data?.purchased_code,
+    transactions?.token,
+    transactions?.Token,
+    root.message,
+    response?.message,
   ];
 
   for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) {
-      return c.replace(/^Token\s*:\s*/i, "").trim();
+    if (typeof c === "string") {
+      const cleaned = cleanTokenValue(c);
+      if (cleaned) return cleaned;
     }
+  }
+
+  // Deep scan common string fields for "Token : 1234…"
+  const blob = JSON.stringify(providerResult);
+  const fromBlob = blob.match(/Token\s*:?\s*(\\?")?(\d[\d\s-]{6,}\d)/i);
+  if (fromBlob?.[2]) {
+    const cleaned = cleanTokenValue(fromBlob[2]);
+    if (cleaned) return cleaned;
+  }
+  return undefined;
+}
+
+function extractUnits(providerResult: unknown): string | undefined {
+  const root = digRecord(providerResult);
+  if (!root) return undefined;
+  const response = digRecord(root.response);
+  const data = digRecord(root.data);
+  const candidates = [response?.Units, response?.units, data?.Units, data?.units, root.Units, root.units];
+  for (const c of candidates) {
+    if (typeof c === "number" && Number.isFinite(c)) return String(c);
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  const msg = typeof root.message === "string" ? root.message : "";
+  const m = msg.match(/units?\s*(?:are|=|:)?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  return m?.[1];
+}
+
+function extractCustomerName(providerResult: unknown): string | undefined {
+  const root = digRecord(providerResult);
+  if (!root) return undefined;
+  const response = digRecord(root.response);
+  const candidates = [
+    root.customer_name,
+    root.Customer_Name,
+    root.CustomerName,
+    response?.CustomerName,
+    response?.customer_name,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
   }
   return undefined;
 }
@@ -219,8 +295,14 @@ export class BillsService {
       currency: input.currency,
       amount: input.amount,
       type: "BILL_PAYMENT",
-      description: `${input.category} ${input.serviceId}`,
+      description: `${input.category} ${svc?.shortName ?? svc?.name ?? input.serviceId}`,
       provider: "strowallet",
+      metadata: asJson({
+        category: input.category,
+        serviceId: input.serviceId,
+        customerRef: input.customerRef,
+        variationCode: input.variationCode,
+      }),
     });
 
     try {
@@ -243,15 +325,19 @@ export class BillsService {
             service_name: input.serviceName ?? input.variationCode ?? undefined,
           });
           break;
-        case "ELECTRICITY":
+        case "ELECTRICITY": {
+          const meterType = (input.variationCode === "postpaid" ? "postpaid" : "prepaid") as "prepaid" | "postpaid";
+          // phone must be a mobile number for SMS — never send the meter as phone
+          const notifyPhone = looksLikeNgPhone(phone) ? phone : looksLikeNgPhone(input.phone) ? String(input.phone) : phone;
           providerResult = await strowalletClient.buyElectricity({
             amount: input.amount,
-            phone,
+            phone: notifyPhone,
             service_name: providerCode,
             meter_number: input.customerRef,
-            meter_type: (input.variationCode as "prepaid" | "postpaid") ?? "prepaid",
+            meter_type: meterType,
           });
           break;
+        }
         case "CABLE":
           providerResult = await strowalletClient.buyCable({
             amount: input.amount,
@@ -274,6 +360,9 @@ export class BillsService {
       }
 
       const token = extractToken(providerResult);
+      const units = extractUnits(providerResult);
+      const customerName = extractCustomerName(providerResult);
+      const displayToken = token ? formatRechargeToken(token) : undefined;
 
       const payment = await prisma.billPayment.create({
         data: {
@@ -287,12 +376,35 @@ export class BillsService {
           phone,
           provider: "strowallet",
           status: "SUCCESS",
-          token,
+          token: displayToken ?? token,
           providerPayload: asJson(providerResult),
         },
       });
 
-      return { ...payment, transaction: walletTx };
+      await prisma.transaction.update({
+        where: { id: walletTx.id },
+        data: {
+          status: "SUCCESS",
+          metadata: asJson({
+            category: input.category,
+            serviceId: input.serviceId,
+            customerRef: input.customerRef,
+            variationCode: input.variationCode,
+            token: displayToken ?? token ?? null,
+            units: units ?? null,
+            customerName: customerName ?? null,
+            meterType: input.variationCode ?? null,
+          }),
+        },
+      });
+
+      return {
+        ...payment,
+        token: displayToken ?? token ?? payment.token,
+        units: units ?? null,
+        customerName: customerName ?? null,
+        transaction: { ...walletTx, status: "SUCCESS" },
+      };
     } catch (error) {
       await walletService.credit({
         userId,
@@ -305,6 +417,14 @@ export class BillsService {
       throw error;
     }
   }
+}
+
+function looksLikeNgPhone(value?: string | null) {
+  if (!value) return false;
+  let raw = value.replace(/\D/g, "");
+  if (raw.startsWith("234")) raw = raw.slice(3);
+  if (raw.length === 10 && !raw.startsWith("0")) raw = `0${raw}`;
+  return /^0[789]\d{9}$/.test(raw);
 }
 
 export const billsService = new BillsService();
