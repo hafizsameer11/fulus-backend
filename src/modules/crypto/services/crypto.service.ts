@@ -8,7 +8,6 @@ import { walletService } from "../../wallet/services/wallet.service.js";
 import {
   simCryptoAddress,
   simRef,
-  simulateProviders,
   useBushaLive,
 } from "../../../lib/simulate.js";
 
@@ -83,6 +82,46 @@ function amountOf(row: Record<string, unknown>, key: string): number {
     if (typeof a === "string") return Number(a) || 0;
   }
   return 0;
+}
+
+function unwrapData(payload: unknown): Record<string, unknown> {
+  const root = asRecord(payload);
+  const data = asRecord(root.data);
+  return Object.keys(data).length ? data : root;
+}
+
+function strOf(obj: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const v = obj[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  return undefined;
+}
+
+/** Map app network labels to Busha network codes. */
+export function bushaNetworkCode(network: string, currency: string) {
+  const n = network.trim().toUpperCase();
+  const c = currency.trim().toUpperCase();
+  if (n === "TRC20" || n === "TRON") return "TRX";
+  if (n === "ERC20" || n === "ETHEREUM") return c === "ETH" ? "ETH" : "ERC20";
+  if (n === "BEP20" || n === "BSC") return "BEP20";
+  if (n === "BITCOIN" || n === "BTC") return "BTC";
+  if (n === "SOLANA" || n === "SOL") return "SOL";
+  if (n === "POLYGON" || n === "MATIC") return "POLYGON";
+  return n || c;
+}
+
+async function requireBushaCustomer(userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user?.bushaCustomerId) {
+    throw new AppError(
+      "Complete Busha customer KYC before using live crypto.",
+      403,
+      "BUSHA_CUSTOMER_REQUIRED",
+    );
+  }
+  return user;
 }
 
 async function ensureCryptoWallet(userId: string, currency: WalletCurrency) {
@@ -205,38 +244,74 @@ export class CryptoService {
     }));
   }
 
-  async createQuote(input: z.infer<typeof quoteSchema>) {
+  async createQuote(input: z.infer<typeof quoteSchema>, customerId?: string) {
+    const amount = Number(input.amount);
+    const base = input.baseCurrency.toUpperCase();
+    const quote = input.quoteCurrency.toUpperCase();
+
     if (useBushaLive()) {
-      return bushaClient.createQuote({
-        side: input.side.toLowerCase(),
-        base_currency: input.baseCurrency,
-        quote_currency: input.quoteCurrency,
-        amount: String(input.amount),
-      });
+      // BUY: pay quote (NGN/USD) → receive base (BTC)
+      // SELL: pay base (BTC) → receive quote (NGN/USD)
+      const body =
+        input.side === "BUY"
+          ? {
+              source_currency: quote,
+              target_currency: base,
+              source_amount: String(amount),
+              pay_in: { type: "balance" },
+              pay_out: { type: "balance" },
+            }
+          : {
+              source_currency: base,
+              target_currency: quote,
+              source_amount: String(amount),
+              pay_in: { type: "balance" },
+              pay_out: { type: "balance" },
+            };
+
+      const raw = await bushaClient.createQuote(body, customerId);
+      const data = unwrapData(raw);
+      const receiveAmount = Number(
+        strOf(data, ["target_amount", "receive_amount", "receiveAmount"]) ?? amount,
+      );
+      const rate = Number(asRecord(data.rate).rate ?? receiveAmount / amount);
+      return {
+        id: strOf(data, ["id", "reference"]) ?? simRef("CQ"),
+        side: input.side,
+        base_currency: base,
+        quote_currency: quote,
+        amount: String(amount),
+        receive_amount: String(receiveAmount),
+        target_amount: String(receiveAmount),
+        source_amount: strOf(data, ["source_amount"]) ?? String(amount),
+        rate: String(rate),
+        provider: "busha",
+        raw: data,
+        expires_at: strOf(data, ["expires_at"]),
+      };
     }
 
-    const amount = Number(input.amount);
-    const baseUsd = SIM_RATES[input.baseCurrency.toUpperCase()] ?? 1;
+    const baseUsd = SIM_RATES[base] ?? 1;
     const quoteUsd =
-      SIM_RATES[input.quoteCurrency.toUpperCase()] ??
-      (input.quoteCurrency === "NGN" ? 1 / 1580 : input.quoteCurrency === "SAR" ? 1 / 3.75 : 1);
+      SIM_RATES[quote] ?? (quote === "NGN" ? 1 / 1580 : quote === "SAR" ? 1 / 3.75 : 1);
 
     let receiveAmount: number;
     if (input.side === "BUY") {
-      const payUsd = amount * (input.quoteCurrency === "USD" ? 1 : quoteUsd);
+      const payUsd = amount * (quote === "USD" ? 1 : quoteUsd);
       receiveAmount = payUsd / baseUsd;
     } else {
       const sellUsd = amount * baseUsd;
-      receiveAmount = sellUsd / (input.quoteCurrency === "USD" ? 1 : quoteUsd);
+      receiveAmount = sellUsd / (quote === "USD" ? 1 : quoteUsd);
     }
 
     return {
       id: simRef("CQ"),
       side: input.side,
-      base_currency: input.baseCurrency,
-      quote_currency: input.quoteCurrency,
+      base_currency: base,
+      quote_currency: quote,
       amount: String(amount),
       receive_amount: receiveAmount.toFixed(8),
+      target_amount: receiveAmount.toFixed(8),
       rate: (receiveAmount / amount).toFixed(8),
       simulated: true,
       expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -254,8 +329,8 @@ export class CryptoService {
     await requireNinKyc(userId);
 
     const amount = Number(input.amount);
-    const debitCurrency = (input.side === "BUY" ? input.quoteCurrency : input.baseCurrency) as WalletCurrency;
-    const creditCurrency = (input.side === "BUY" ? input.baseCurrency : input.quoteCurrency) as WalletCurrency;
+    const debitCurrency = (input.side === "BUY" ? input.quoteCurrency : input.baseCurrency).toUpperCase() as WalletCurrency;
+    const creditCurrency = (input.side === "BUY" ? input.baseCurrency : input.quoteCurrency).toUpperCase() as WalletCurrency;
 
     if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
       await ensureCryptoWallet(userId, creditCurrency);
@@ -264,12 +339,10 @@ export class CryptoService {
       await ensureCryptoWallet(userId, debitCurrency);
     }
 
-    const quote = await this.createQuote(input);
-    const receiveAmount = Number(
-      (quote as { receive_amount?: string }).receive_amount ??
-        (quote as { receiveAmount?: number }).receiveAmount ??
-        amount,
-    );
+    const live = useBushaLive();
+    const customer = live ? await requireBushaCustomer(userId) : null;
+    const quote = await this.createQuote(input, customer?.bushaCustomerId ?? undefined);
+    const receiveAmount = Number(quote.receive_amount ?? quote.target_amount ?? amount);
 
     const walletTx = await walletService.debit({
       userId,
@@ -277,24 +350,37 @@ export class CryptoService {
       amount,
       type: input.side === "BUY" ? "CRYPTO_BUY" : "CRYPTO_SELL",
       description: `${input.side} ${input.baseCurrency}/${input.quoteCurrency}`,
-      provider: useBushaLive() ? "busha" : "simulated",
+      provider: live ? "busha" : "simulated",
+      metadata: asJson({
+        kind: "crypto_order_debit",
+        side: input.side,
+        creditCurrency,
+        creditAmount: receiveAmount,
+        quoteId: quote.id,
+      }),
     });
 
     try {
       let providerResult: Record<string, unknown>;
-      if (useBushaLive()) {
-        providerResult = (await bushaClient.createPayment({
-          quote_amount: String(input.amount),
-          quote_currency: input.quoteCurrency,
-          source_currency: input.baseCurrency,
-          target_currency: input.baseCurrency,
-          reference: walletTx.reference,
-          pay_in: input.network ? { type: "address", network: input.network } : { type: "balance" },
-          additional_info: { reference: walletTx.reference },
-          dry_run: false,
-        })) as Record<string, unknown>;
+      let providerRef: string;
+      let status: "SUCCESS" | "PROCESSING" = "SUCCESS";
+
+      if (live) {
+        // Quote → Transfer (balance→balance). Fiat/crypto credit waits for Busha webhook.
+        const quoteId = quote.id;
+        if (!quoteId) throw new AppError("Busha quote missing id", 502);
+        // Fresh quote immediately before transfer (quotes expire quickly).
+        const fresh = await this.createQuote(input, customer!.bushaCustomerId!);
+        const transferRaw = await bushaClient.createTransfer(
+          { quote_id: fresh.id },
+          customer!.bushaCustomerId!,
+        );
+        providerResult = unwrapData(transferRaw);
+        providerRef = strOf(providerResult, ["id", "reference"]) ?? makeReference("BU");
+        status = "PROCESSING";
       } else {
         providerResult = { simulated: true, id: simRef("BU") };
+        providerRef = String(providerResult.id);
         if (["NGN", "USD", "SAR", "USDT", "BTC", "ETH"].includes(creditCurrency)) {
           await walletService.credit({
             userId,
@@ -313,16 +399,22 @@ export class CryptoService {
           userId,
           transactionId: walletTx.id,
           side: input.side,
-          baseCurrency: input.baseCurrency,
-          quoteCurrency: input.quoteCurrency,
+          baseCurrency: input.baseCurrency.toUpperCase(),
+          quoteCurrency: input.quoteCurrency.toUpperCase(),
           amount,
           quoteAmount: receiveAmount,
           rate: receiveAmount / amount,
           network: input.network,
-          provider: useBushaLive() ? "busha" : "simulated",
-          providerRef: typeof providerResult.id === "string" ? providerResult.id : makeReference("BU"),
-          status: "SUCCESS",
-          providerPayload: asJson(providerResult),
+          provider: live ? "busha" : "simulated",
+          providerRef,
+          status,
+          providerPayload: asJson({
+            quote,
+            transfer: providerResult,
+            creditCurrency,
+            creditAmount: receiveAmount,
+            awaitingWebhook: live,
+          }),
         },
       });
 
@@ -345,12 +437,68 @@ export class CryptoService {
 
     const currency = input.currency.toUpperCase();
     const network = input.network;
+    const bushaNet = bushaNetworkCode(network, currency);
     const existing = await prisma.cryptoAddress.findUnique({
       where: { userId_currency_network: { userId, currency, network } },
     });
-    if (existing) return existing;
+    if (existing && !existing.address.startsWith("bc1qsim") && !existing.address.includes("sim")) {
+      return existing;
+    }
 
-    const address = simCryptoAddress(currency, network, userId);
+    if (!useBushaLive()) {
+      const address = simCryptoAddress(currency, network, userId);
+      if (existing) {
+        return prisma.cryptoAddress.update({
+          where: { id: existing.id },
+          data: { address, provider: "simulated" },
+        });
+      }
+      return prisma.cryptoAddress.create({
+        data: { userId, currency, network, address, provider: "simulated" },
+      });
+    }
+
+    const customer = await requireBushaCustomer(userId);
+    let address: string | undefined;
+
+    try {
+      const raw = await bushaClient.getDepositAddress(currency, customer.bushaCustomerId!, bushaNet);
+      const data = unwrapData(raw);
+      address =
+        strOf(data, ["address", "deposit_address"]) ??
+        strOf(asRecord(data.pay_in), ["address"]);
+    } catch {
+      // Fallback: quote + transfer generates a one-shot deposit address.
+      const minAmount = currency === "BTC" ? "0.0001" : currency === "ETH" ? "0.001" : "1";
+      const quoteRaw = await bushaClient.createQuote(
+        {
+          source_currency: currency,
+          target_currency: currency,
+          source_amount: minAmount,
+          pay_in: { type: "address", network: bushaNet },
+        },
+        customer.bushaCustomerId!,
+      );
+      const quote = unwrapData(quoteRaw);
+      const quoteId = strOf(quote, ["id"]);
+      if (!quoteId) throw new AppError("Could not create Busha deposit quote", 502);
+      const transferRaw = await bushaClient.createTransfer({ quote_id: quoteId }, customer.bushaCustomerId!);
+      const transfer = unwrapData(transferRaw);
+      const payIn = asRecord(transfer.pay_in);
+      address = strOf(payIn, ["address"]) ?? strOf(transfer, ["address"]);
+    }
+
+    if (!address) throw new AppError("Busha did not return a deposit address", 502);
+
+    if (existing) {
+      return prisma.cryptoAddress.update({
+        where: { id: existing.id },
+        data: {
+          address,
+          provider: "busha",
+        },
+      });
+    }
 
     return prisma.cryptoAddress.create({
       data: {
@@ -358,7 +506,7 @@ export class CryptoService {
         currency,
         network,
         address,
-        provider: useBushaLive() ? "busha" : "simulated",
+        provider: "busha",
       },
     });
   }
@@ -375,6 +523,8 @@ export class CryptoService {
       throw new AppError("Unsupported crypto currency");
     }
     await ensureCryptoWallet(userId, currency);
+    const bushaNet = bushaNetworkCode(input.network, currency);
+    const live = useBushaLive();
 
     const walletTx = await walletService.debit({
       userId,
@@ -382,20 +532,85 @@ export class CryptoService {
       amount: input.amount,
       type: "CRYPTO_SEND",
       description: `Send ${currency} to ${input.address.slice(0, 10)}…`,
-      provider: simulateProviders() || !useBushaLive() ? "simulated" : "busha",
+      provider: live ? "busha" : "simulated",
       metadata: asJson({
         address: input.address,
         network: input.network,
+        bushaNetwork: bushaNet,
         memo: input.memo,
+        awaitingWebhook: live,
       }),
     });
 
-    return {
-      transaction: walletTx,
-      status: "SUCCESS",
-      simulated: !useBushaLive(),
-      providerRef: simRef("SEND"),
-    };
+    if (!live) {
+      return {
+        transaction: walletTx,
+        status: "SUCCESS",
+        simulated: true,
+        providerRef: simRef("SEND"),
+      };
+    }
+
+    try {
+      const customer = await requireBushaCustomer(userId);
+      const quoteRaw = await bushaClient.createQuote(
+        {
+          source_currency: currency,
+          target_currency: currency,
+          source_amount: String(input.amount),
+          pay_out: {
+            type: "address",
+            address: input.address,
+            network: bushaNet,
+            ...(input.memo ? { memo: input.memo } : {}),
+          },
+        },
+        customer.bushaCustomerId!,
+      );
+      const quote = unwrapData(quoteRaw);
+      const quoteId = strOf(quote, ["id"]);
+      if (!quoteId) throw new AppError("Busha withdraw quote missing id", 502);
+
+      const transferRaw = await bushaClient.createTransfer({ quote_id: quoteId }, customer.bushaCustomerId!);
+      const transfer = unwrapData(transferRaw);
+      const providerRef = strOf(transfer, ["id", "reference"]) ?? makeReference("SND");
+
+      await prisma.transaction.update({
+        where: { id: walletTx.id },
+        data: {
+          status: "PROCESSING",
+          providerRef,
+          metadata: asJson({
+            address: input.address,
+            network: input.network,
+            bushaNetwork: bushaNet,
+            memo: input.memo,
+            quote,
+            transfer,
+            awaitingWebhook: true,
+            kind: "crypto_send",
+          }),
+        },
+      });
+
+      return {
+        transaction: await prisma.transaction.findUniqueOrThrow({ where: { id: walletTx.id } }),
+        status: "PROCESSING",
+        simulated: false,
+        providerRef,
+        transfer,
+      };
+    } catch (error) {
+      await walletService.credit({
+        userId,
+        currency,
+        amount: input.amount,
+        type: "ADJUSTMENT",
+        description: `Refund failed crypto send ${walletTx.reference}`,
+        provider: "busha",
+      });
+      throw error;
+    }
   }
 
   /** Simulate an inbound crypto deposit credit (demo faucet). */

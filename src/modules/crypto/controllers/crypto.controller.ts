@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { created, ok } from "../../../lib/http.js";
 import { UnauthorizedError } from "../../../lib/errors.js";
+import { prisma } from "../../../lib/prisma.js";
 import {
   createOrderSchema,
   cryptoService,
@@ -27,7 +28,15 @@ export class CryptoController {
 
   quote = async (req: Request, res: Response) => {
     const input = quoteSchema.parse(req.body);
-    return ok(res, await cryptoService.createQuote(input));
+    let customerId: string | undefined;
+    if (req.user) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { bushaCustomerId: true },
+      });
+      customerId = user?.bushaCustomerId ?? undefined;
+    }
+    return ok(res, await cryptoService.createQuote(input, customerId));
   };
 
   listOrders = async (req: Request, res: Response) => {

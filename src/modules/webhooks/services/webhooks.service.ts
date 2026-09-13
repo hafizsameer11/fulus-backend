@@ -127,13 +127,20 @@ export class WebhooksService {
     });
     if (existing) return;
 
+    const existingTx = await prisma.transaction.findFirst({
+      where: { provider: "busha", providerRef: reference, type: "CRYPTO_RECEIVE" },
+    });
+    if (existingTx) return;
+
     const user = profileId
       ? await prisma.user.findFirst({ where: { bushaCustomerId: profileId } })
       : null;
     if (!user) return;
 
-    // Only credit local fiat wallets we support
-    if (!["NGN", "USD", "SAR"].includes(currency)) {
+    const fiat = ["NGN", "USD", "SAR"].includes(currency);
+    const crypto = ["USDT", "BTC", "ETH"].includes(currency);
+
+    if (!fiat && !crypto) {
       await createInboxMessage({
         userId: user.id,
         category: "crypto",
@@ -143,37 +150,51 @@ export class WebhooksService {
       return;
     }
 
+    if (crypto) {
+      await prisma.wallet.upsert({
+        where: { userId_currency: { userId: user.id, currency: currency as "USDT" | "BTC" | "ETH" } },
+        create: { userId: user.id, currency: currency as "USDT" | "BTC" | "ETH", isVirtual: true, available: 0, pending: 0 },
+        update: {},
+      });
+    }
+
     const tx = await walletService.credit({
       userId: user.id,
-      currency: currency as "NGN" | "USD" | "SAR",
+      currency: currency as "NGN" | "USD" | "SAR" | "USDT" | "BTC" | "ETH",
       amount,
-      type: "DEPOSIT",
-      description: str(data.channel) ? `Busha ${String(data.channel)} deposit` : "Busha deposit",
+      type: crypto ? "CRYPTO_RECEIVE" : "DEPOSIT",
+      description: str(data.channel)
+        ? `Busha ${String(data.channel)} deposit`
+        : crypto
+          ? `Received ${currency}`
+          : "Busha deposit",
       provider: "busha",
       providerRef: reference,
       metadata: asJson(data),
     });
 
-    await prisma.deposit.create({
-      data: {
-        userId: user.id,
-        transactionId: tx.id,
-        method: "CRYPTO",
-        currency: currency as "NGN" | "USD" | "SAR",
-        amount,
-        status: "SUCCESS",
-        provider: "busha",
-        providerRef: reference,
-        confirmedAt: new Date(),
-        metadata: asJson(data),
-        instructions: { reference },
-      },
-    });
+    if (fiat) {
+      await prisma.deposit.create({
+        data: {
+          userId: user.id,
+          transactionId: tx.id,
+          method: "CRYPTO",
+          currency: currency as "NGN" | "USD" | "SAR",
+          amount,
+          status: "SUCCESS",
+          provider: "busha",
+          providerRef: reference,
+          confirmedAt: new Date(),
+          metadata: asJson(data),
+          instructions: { reference },
+        },
+      });
+    }
 
     await createInboxMessage({
       userId: user.id,
-      category: "wallet",
-      title: "Deposit confirmed",
+      category: crypto ? "crypto" : "wallet",
+      title: crypto ? "Crypto received" : "Deposit confirmed",
       body: `${amount} ${currency} was credited from Busha.`,
     });
   }
@@ -185,10 +206,46 @@ export class WebhooksService {
     const order = await prisma.cryptoOrder.findFirst({
       where: { providerRef },
     });
-    if (!order) return;
+
+    // Crypto send (withdraw) — mark debit tx SUCCESS / FAILED
+    if (!order) {
+      const sendTx = await prisma.transaction.findFirst({
+        where: { providerRef, type: "CRYPTO_SEND" },
+      });
+      if (sendTx) {
+        const ok =
+          eventType === "transfer.completed" ||
+          eventType === "transfer.funds_converted" ||
+          eventType === "transfer.funds_delivered";
+        const failed = eventType === "transfer.failed" || eventType === "transfer.cancelled";
+        if (ok && sendTx.status !== "SUCCESS") {
+          await prisma.transaction.update({
+            where: { id: sendTx.id },
+            data: { status: "SUCCESS", metadata: asJson({ ...asRecord(sendTx.metadata), webhook: data, eventType }) },
+          });
+        } else if (failed && sendTx.status === "PROCESSING") {
+          await prisma.transaction.update({
+            where: { id: sendTx.id },
+            data: { status: "FAILED" },
+          });
+          await walletService.credit({
+            userId: sendTx.userId,
+            currency: sendTx.currency,
+            amount: sendTx.amount,
+            type: "ADJUSTMENT",
+            description: `Refund failed crypto send ${sendTx.reference}`,
+            provider: "busha",
+            providerRef: `${providerRef}_refund`,
+          });
+        }
+      }
+      return;
+    }
 
     const status =
-      eventType === "transfer.completed" || eventType === "transfer.funds_converted"
+      eventType === "transfer.completed" ||
+      eventType === "transfer.funds_converted" ||
+      eventType === "transfer.funds_delivered"
         ? "SUCCESS"
         : eventType === "transfer.failed" || eventType === "transfer.cancelled"
           ? "FAILED"
@@ -210,6 +267,86 @@ export class WebhooksService {
           providerRef,
         },
       });
+    }
+
+    // Credit fiat/crypto leg once when Busha confirms the conversion.
+    if (status === "SUCCESS") {
+      const payload = asRecord(order.providerPayload);
+      if (payload.creditSettled) return;
+
+      const creditCurrency = str(payload.creditCurrency)?.toUpperCase();
+      const creditAmount =
+        num(payload.creditAmount) ??
+        num(data.target_amount) ??
+        Number(order.quoteAmount);
+
+      if (creditCurrency && creditAmount > 0) {
+        const already = await prisma.transaction.findFirst({
+          where: {
+            userId: order.userId,
+            provider: "busha",
+            providerRef: `${providerRef}_credit`,
+            type: { in: ["CRYPTO_BUY", "CRYPTO_SELL"] },
+          },
+        });
+        if (!already) {
+          if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
+            await prisma.wallet.upsert({
+              where: {
+                userId_currency: {
+                  userId: order.userId,
+                  currency: creditCurrency as "USDT" | "BTC" | "ETH",
+                },
+              },
+              create: {
+                userId: order.userId,
+                currency: creditCurrency as "USDT" | "BTC" | "ETH",
+                isVirtual: true,
+                available: 0,
+                pending: 0,
+              },
+              update: {},
+            });
+          }
+          await walletService.credit({
+            userId: order.userId,
+            currency: creditCurrency as "NGN" | "USD" | "SAR" | "USDT" | "BTC" | "ETH",
+            amount: creditAmount,
+            type: order.side === "BUY" ? "CRYPTO_BUY" : "CRYPTO_SELL",
+            description: `${order.side} credit ${creditCurrency}`,
+            provider: "busha",
+            providerRef: `${providerRef}_credit`,
+            metadata: asJson({ orderId: order.id, eventType, webhook: data }),
+          });
+        }
+      }
+
+      await prisma.cryptoOrder.update({
+        where: { id: order.id },
+        data: {
+          providerPayload: asJson({
+            ...asRecord(order.providerPayload),
+            webhook: data,
+            eventType,
+            creditSettled: true,
+          }),
+        },
+      });
+    }
+
+    if (status === "FAILED" && order.transactionId) {
+      const debitTx = await prisma.transaction.findUnique({ where: { id: order.transactionId } });
+      if (debitTx && debitTx.status !== "REVERSED") {
+        await walletService.credit({
+          userId: order.userId,
+          currency: debitTx.currency,
+          amount: debitTx.amount,
+          type: "ADJUSTMENT",
+          description: `Refund failed crypto order ${order.id}`,
+          provider: "busha",
+          providerRef: `${providerRef}_refund`,
+        });
+      }
     }
   }
 

@@ -84,20 +84,32 @@ export class BushaClient {
     return this.request(`/v1/customers/${customerId}/verify`, { method: "POST", body: {} });
   }
 
-  createPayment(body: Record<string, unknown>) {
-    return this.request("/v1/payments", { method: "POST", body, usePublic: true });
+  createPayment(body: Record<string, unknown>, customerId?: string) {
+    return this.request("/v1/payments", { method: "POST", body, usePublic: true, profileId: customerId });
   }
 
   getRates(query?: Record<string, string>) {
     return this.request("/v1/rates", { query });
   }
 
-  createQuote(body: Record<string, unknown>) {
-    return this.request("/v1/quotes", { method: "POST", body });
+  createQuote(body: Record<string, unknown>, customerId?: string) {
+    return this.request("/v1/quotes", { method: "POST", body, profileId: customerId });
   }
 
-  createTransfer(body: Record<string, unknown>) {
-    return this.request("/v1/transfers", { method: "POST", body });
+  createTransfer(body: Record<string, unknown>, customerId?: string) {
+    return this.request("/v1/transfers", { method: "POST", body, profileId: customerId });
+  }
+
+  getTransfer(transferId: string, customerId?: string) {
+    return this.request(`/v1/transfers/${encodeURIComponent(transferId)}`, { profileId: customerId });
+  }
+
+  /** GET /v1/addresses/{code} — persistent deposit address for a currency. */
+  getDepositAddress(code: string, customerId?: string, network?: string) {
+    return this.request(`/v1/addresses/${encodeURIComponent(code)}`, {
+      profileId: customerId,
+      query: network ? { network } : undefined,
+    });
   }
 }
 
