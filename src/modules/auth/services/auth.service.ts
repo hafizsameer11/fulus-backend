@@ -3,7 +3,7 @@ import { createHash, randomInt } from "node:crypto";
 import { z } from "zod";
 import { EmailOtpPurpose, WalletCurrency } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, ConflictError, UnauthorizedError } from "../../../lib/errors.js";
+import { AppError, ConflictError } from "../../../lib/errors.js";
 import { signAccessToken } from "../../../middleware/auth.js";
 import { emailConfigured, otpEmailContent, sendEmail } from "../../../lib/mailer.js";
 import { env } from "../../../config/env.js";
