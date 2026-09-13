@@ -2,6 +2,38 @@ import { env } from "../../config/env.js";
 import { ProviderError } from "../../lib/errors.js";
 import { providerFetch } from "../../lib/provider-http.js";
 
+function extractUpstreamMessage(data: unknown, fallback: string): string {
+  if (!data || typeof data !== "object") return fallback;
+  const root = data as Record<string, unknown>;
+  const nested =
+    root.data && typeof root.data === "object"
+      ? (root.data as Record<string, unknown>)
+      : root.response && typeof root.response === "object"
+        ? (root.response as Record<string, unknown>)
+        : null;
+
+  const candidates = [
+    root.message,
+    root.error,
+    root.msg,
+    root.response_description,
+    root.responseDescription,
+    nested?.message,
+    nested?.error,
+    nested?.msg,
+  ];
+
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) {
+      const t = c.trim();
+      // Ignore empty success-ish placeholders
+      if (/^suc+ess!?$/i.test(t)) continue;
+      return t;
+    }
+  }
+  return fallback;
+}
+
 /**
  * Strowallet — airtime, data, electricity, cable and other bill payments.
  * Docs: https://strowallet.readme.io/
@@ -34,7 +66,11 @@ export class StrowalletClient {
     });
 
     if (status >= 400) {
-      throw new ProviderError("strowallet", `Request failed with status ${status}`, data);
+      throw new ProviderError(
+        "strowallet",
+        extractUpstreamMessage(data, `Request failed with status ${status}`),
+        data,
+      );
     }
 
     // Many Strowallet bill endpoints return HTTP 200 with success:false
@@ -44,9 +80,11 @@ export class StrowalletClient {
       "success" in data &&
       (data as { success?: boolean }).success === false
     ) {
-      const msg = (data as { message?: unknown }).message;
-      const message = typeof msg === "string" ? msg : "Strowallet request failed";
-      throw new ProviderError("strowallet", message, data);
+      throw new ProviderError(
+        "strowallet",
+        extractUpstreamMessage(data, "Payment could not be completed. Please try again."),
+        data,
+      );
     }
 
     return data;

@@ -13,6 +13,8 @@ export const payBillSchema = z.object({
   amount: z.number().positive(),
   phone: z.string().optional(),
   variationCode: z.string().optional(),
+  /** Plan display name — required by some bill rails for DATA/CABLE */
+  serviceName: z.string().min(1).optional(),
   currency: z.enum(["NGN"]).default("NGN"),
 });
 
@@ -186,7 +188,7 @@ export class BillsService {
 
   async verifyMeter(input: z.infer<typeof verifyMeterSchema>) {
     if (!useStrowalletLive()) {
-      throw new AppError("Meter verification requires a live bill provider", 503, "PROVIDER_UNAVAILABLE");
+      throw new AppError("Meter verification is temporarily unavailable. Please try again later.", 503, "PROVIDER_UNAVAILABLE");
     }
 
     const svc = await prisma.billService.findUnique({ where: { id: input.serviceID } });
@@ -205,11 +207,11 @@ export class BillsService {
     const providerCode = svc?.providerCode ?? input.serviceId;
 
     if (input.category === "BETTING") {
-      throw new AppError("Betting top-up is not available via Strowallet yet", 400, "UNSUPPORTED_BILL");
+      throw new AppError("Betting top-up is not available yet", 400, "UNSUPPORTED_BILL");
     }
 
     if (!useStrowalletLive()) {
-      throw new AppError("Bill payments require a live provider — demo/seed checkout is disabled", 503, "PROVIDER_UNAVAILABLE");
+      throw new AppError("Bill payments are temporarily unavailable. Please try again later.", 503, "PROVIDER_UNAVAILABLE");
     }
 
     const walletTx = await walletService.debit({
@@ -238,6 +240,7 @@ export class BillsService {
             phone,
             service_id: dataServiceId(providerCode),
             variation_code: input.variationCode ?? "",
+            service_name: input.serviceName ?? input.variationCode ?? undefined,
           });
           break;
         case "ELECTRICITY":

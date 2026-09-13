@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { ZodError, type ZodType } from "zod";
-import { AppError } from "../lib/errors.js";
+import { AppError, toUserFacingErrorMessage } from "../lib/errors.js";
 import { fail } from "../lib/http.js";
 
 function zodUserMessage(err: ZodError): string {
@@ -31,7 +31,14 @@ function zodUserMessage(err: ZodError): string {
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
   if (err instanceof AppError) {
-    return fail(res, err.message, err.statusCode, err.code, err.details);
+    return fail(
+      res,
+      toUserFacingErrorMessage(err.message, err.message),
+      err.statusCode,
+      err.code,
+      // Never leak raw upstream payloads to clients
+      err.code === "PROVIDER_ERROR" ? undefined : err.details,
+    );
   }
 
   if (err instanceof ZodError) {
