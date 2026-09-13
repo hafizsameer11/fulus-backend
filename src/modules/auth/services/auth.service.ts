@@ -17,8 +17,8 @@ export const registerSchema = z.object({
 });
 
 export const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+  email: z.string().trim().min(1, "Email is required").email("Enter a valid email address"),
+  password: z.string().min(1, "Password is required"),
 });
 
 export const forgotPasswordSchema = z.object({
@@ -233,10 +233,14 @@ export class AuthService {
 
   async login(input: z.infer<typeof loginSchema>) {
     const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
-    if (!user) throw new UnauthorizedError("Invalid email or password");
+    if (!user) {
+      throw new AppError("No account found with this email", 401, "EMAIL_NOT_FOUND");
+    }
 
     const valid = await bcrypt.compare(input.password, user.passwordHash);
-    if (!valid) throw new UnauthorizedError("Invalid email or password");
+    if (!valid) {
+      throw new AppError("Incorrect password", 401, "INVALID_PASSWORD");
+    }
     if (user.status !== "ACTIVE") throw new AppError("Account is not active", 403, "ACCOUNT_INACTIVE");
 
     const accessToken = signAccessToken({ id: user.id, email: user.email });
