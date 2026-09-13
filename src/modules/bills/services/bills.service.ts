@@ -76,14 +76,27 @@ function asPlanList(raw: unknown): unknown[] {
   if (Array.isArray(raw)) return raw;
   if (!raw || typeof raw !== "object") return [];
   const root = raw as Record<string, unknown>;
-  if (Array.isArray(root.data)) return root.data;
-  if (Array.isArray(root.plans)) return root.plans;
-  if (Array.isArray(root.variations)) return root.variations;
+
+  // Prefer nested plan arrays (Strowallet docs typo: "varations")
+  const nestedKeys = ["variations", "varations", "plans", "data", "content", "result"];
+  for (const key of nestedKeys) {
+    if (Array.isArray(root[key])) return root[key] as unknown[];
+  }
+
   if (root.data && typeof root.data === "object") {
     const data = root.data as Record<string, unknown>;
-    if (Array.isArray(data.variations)) return data.variations;
-    if (Array.isArray(data.plans)) return data.plans;
+    for (const key of nestedKeys) {
+      if (Array.isArray(data[key])) return data[key] as unknown[];
+    }
   }
+
+  if (root.content && typeof root.content === "object") {
+    const content = root.content as Record<string, unknown>;
+    for (const key of nestedKeys) {
+      if (Array.isArray(content[key])) return content[key] as unknown[];
+    }
+  }
+
   return [];
 }
 
@@ -153,7 +166,8 @@ export class BillsService {
             const plans = normalizeProviderPlans(await strowalletClient.getCablePlans(svc.providerCode ?? svc.id));
             return { ...svc, variations: plans };
           }
-        } catch {
+        } catch (err) {
+          console.error(`[bills:catalog] ${svc.category} ${svc.id}`, err);
           return { ...svc, variations: [] as CatalogVariation[] };
         }
 
