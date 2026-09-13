@@ -7,6 +7,7 @@ import { AppError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
 import { bushaCustomerService } from "../../busha/services/busha-customer.service.js";
+import { cardsService } from "../../cards/services/cards.service.js";
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -213,9 +214,77 @@ export class WebhooksService {
   }
 
   async handlePagocards(payload: unknown) {
-    const event = await this.ingest("pagocards", payload, undefined, this.eventType(payload));
-    await prisma.webhookEvent.update({ where: { id: event.id }, data: { processed: true } });
-    return event;
+    const p = asRecord(payload);
+    const eventType = this.eventType(payload);
+    const event = await this.ingest("pagocards", payload, undefined, eventType);
+    const eventId =
+      str(p.event_id) ?? str(p.eventId) ?? str(asRecord(p.data).event_id) ?? event.id;
+
+    try {
+      await this.handlePagocardsCardEvent(p, eventType, eventId);
+      return prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: true, error: null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Pagocards webhook processing failed";
+      await prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: false, error: message },
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Pagocards card webhooks — settle card→NGN withdraws once confirmed.
+   * Docs list virtualcard.* events; withdraw confirmation may arrive as a withdraw-named
+   * event or with the WD* transaction_id from POST …/withdraw.
+   */
+  private async handlePagocardsCardEvent(
+    p: Record<string, unknown>,
+    eventType: string | undefined,
+    eventId: string,
+  ) {
+    const data = asRecord(p.data);
+    const providerCardId =
+      str(p.cardid) ?? str(p.card_id) ?? str(data.cardid) ?? str(data.card_id) ?? str(data.cardId);
+    const pagoTxId =
+      str(data.transaction_id) ??
+      str(data.transactionId) ??
+      str(data.id) ??
+      str(data.reference) ??
+      str(p.transaction_id);
+    const amountUsd =
+      num(data.display_amount) ??
+      (num(data.amount) != null && Number(data.amount) >= 1000
+        ? Number(data.amount) / 1_000_000
+        : num(data.amount));
+    const status = (str(data.status) ?? str(p.status) ?? "").toLowerCase();
+    const evt = (eventType ?? "").toLowerCase();
+    const looksLikeWithdraw =
+      evt.includes("withdraw") ||
+      (pagoTxId?.toUpperCase().startsWith("WD") ?? false) ||
+      (str(data.transaction_type) ?? "").toLowerCase().includes("withdraw");
+
+    if (!looksLikeWithdraw && !pagoTxId?.toUpperCase().startsWith("WD")) {
+      return;
+    }
+
+    if (status === "failed" || status === "fail") {
+      return;
+    }
+
+    if (status && !["completed", "success", "2", ""].includes(status) && looksLikeWithdraw) {
+      return;
+    }
+
+    await cardsService.settleWithdrawToNgn({
+      providerCardId,
+      pagoTxId,
+      amountUsd,
+      eventId,
+    });
   }
 
   async handleStrowallet(payload: unknown) {

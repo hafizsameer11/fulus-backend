@@ -16,6 +16,11 @@ export const PAGO_VISA = {
    * (Create-time `initial_load`, if used, has a separate $10 minimum.)
    */
   minFundUsd: 5,
+  /**
+   * Card must retain at least this after withdraw (Pagocards 493-BIN rule).
+   * e.g. $7 balance → max withdraw $2.
+   */
+  minRetainBalanceUsd: 5,
   /** @deprecated use minFundUsd — kept for mobile compatibility */
   minInitialFundUsd: 5,
   /** Flat portion of every card load — 493-BIN */

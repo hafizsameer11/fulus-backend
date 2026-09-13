@@ -8,6 +8,7 @@ import {
   limitsCardSchema,
   pinCardSchema,
   renameCardSchema,
+  withdrawCardSchema,
 } from "../services/cards.service.js";
 
 export class CardsController {
@@ -36,6 +37,12 @@ export class CardsController {
     if (!req.user) throw new UnauthorizedError();
     const input = fundCardSchema.parse(req.body);
     return ok(res, await cardsService.fund(req.user.id, String(req.params.id), input));
+  };
+
+  withdraw = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    const input = withdrawCardSchema.parse(req.body);
+    return ok(res, await cardsService.withdraw(req.user.id, String(req.params.id), input));
   };
 
   freeze = async (req: Request, res: Response) => {

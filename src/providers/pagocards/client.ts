@@ -95,6 +95,15 @@ export class PagocardsClient {
     });
   }
 
+  /** POST /api/v1/cards/{id}/withdraw — USD off card → merchant 400BIN wallet (no Pagocards fee). */
+  withdrawVisaCard(input: { card_id: string; amount: number }) {
+    return this.request(`/api/v1/cards/${encodeURIComponent(input.card_id)}/withdraw`, {
+      body: { amount: input.amount },
+      idempotent: true,
+      idempotencyLabel: "withdraw_card",
+    });
+  }
+
   blockVisaCard(input: { card_id: string }) {
     return this.request(`/api/v1/cards/${encodeURIComponent(input.card_id)}/block`, {
       method: "POST",

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
@@ -13,6 +13,8 @@ import {
 } from "../../../providers/pagocards/fees.js";
 import { extractPagoCardSecrets, pagoDisplayBalance, pagoPayloadData, pickPagoString } from "../../../providers/pagocards/parse.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
+import { fxService } from "../../fx/services/fx.service.js";
+import { createInboxMessage } from "../../../lib/inbox.js";
 import { simLast4, simRef, usePagocardsLive } from "../../../lib/simulate.js";
 
 export const createCardSchema = z.object({
@@ -28,6 +30,11 @@ export const fundCardSchema = z.object({
   /** Amount that lands on the card (Pagocards takes $0.15 + 0.75% on top from merchant wallet). */
   amount: z.number().positive(),
   currency: z.enum(["USD", "NGN", "SAR"]).default("USD"),
+});
+
+export const withdrawCardSchema = z.object({
+  /** USD to pull off the card (must leave ≥ $5). Settles to NGN after Pagocards webhook. */
+  amount: z.number().positive(),
 });
 
 export const renameCardSchema = z.object({
@@ -56,6 +63,12 @@ function payloadOf(card: { providerPayload: unknown }) {
   return (card.providerPayload && typeof card.providerPayload === "object"
     ? card.providerPayload
     : {}) as Record<string, unknown>;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function sleep(ms: number) {
@@ -576,6 +589,326 @@ export class CardsService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Pull USD off a 493-BIN card into the merchant Pagocards wallet.
+   * NGN is credited only after Pagocards webhook confirmation (simulated settles immediately).
+   * @see https://pagocards.com/documentation — Withdraw 4XX-BIN Card
+   */
+  async withdraw(userId: string, cardId: string, input: z.infer<typeof withdrawCardSchema>) {
+    const card = await this.get(userId, cardId);
+    if (!card.providerCardId) throw new AppError("Card is not ready for withdrawal");
+    if (String(card.status).toUpperCase() === "FROZEN") {
+      throw new AppError("Unfreeze the card before withdrawing", 400);
+    }
+
+    const amount = Math.round(input.amount * 100) / 100;
+    const balance = Number(card.balance);
+    const maxWithdraw = Math.round((balance - PAGO_VISA.minRetainBalanceUsd) * 100) / 100;
+    if (maxWithdraw <= 0) {
+      throw new AppError(
+        `Card must keep at least $${PAGO_VISA.minRetainBalanceUsd}. Current balance is $${balance.toFixed(2)}.`,
+        400,
+      );
+    }
+    if (amount > maxWithdraw + 1e-9) {
+      throw new AppError(
+        `Maximum withdrawable is $${maxWithdraw.toFixed(2)} (must leave $${PAGO_VISA.minRetainBalanceUsd} on the card)`,
+        400,
+      );
+    }
+
+    const live = usePagocardsLive();
+    const providerRef = makeReference("PCW");
+    const pendingTx = await prisma.transaction.create({
+      data: {
+        userId,
+        type: "CARD_WITHDRAW",
+        status: "PROCESSING",
+        amount,
+        currency: "USD",
+        reference: makeReference("TX"),
+        provider: live ? "pagocards" : "simulated",
+        providerRef,
+        description: `Withdraw $${amount} from Visa ••${card.last4 ?? "••••"} → NGN (awaiting confirmation)`,
+        metadata: asJson({
+          kind: "card_withdraw",
+          cardId: card.id,
+          providerCardId: card.providerCardId,
+          amountUsd: amount,
+          settleCurrency: "NGN",
+          awaitingWebhook: live,
+        }),
+      },
+    });
+
+    try {
+      const providerResult = live
+        ? await pagocardsClient.withdrawVisaCard({
+            card_id: card.providerCardId,
+            amount,
+          })
+        : {
+            simulated: true,
+            status: "completed",
+            data: {
+              card_id: card.providerCardId,
+              display_amount: amount,
+              transaction_id: `WD_SIM_${Date.now()}`,
+              wallet_transaction_id: `wallet_sim_${Date.now()}`,
+            },
+          };
+
+      const data = pagoPayloadData(providerResult);
+      const pagoTxId =
+        pickPagoString(data, ["transaction_id", "transactionId", "id"]) ??
+        pickPagoString(asRecord(providerResult), ["transaction_id"]);
+      const walletTxId = pickPagoString(data, ["wallet_transaction_id", "walletTransactionId"]);
+      const providerStatus = (pickPagoString(data, ["status"]) ?? "completed").toLowerCase();
+
+      await prisma.cardFunding.create({
+        data: {
+          cardId: card.id,
+          transactionId: pendingTx.id,
+          amount,
+          direction: "WITHDRAW",
+          providerRef: pagoTxId ?? providerRef,
+        },
+      });
+
+      const updated = await prisma.card.update({
+        where: { id: card.id },
+        data: {
+          balance: { decrement: amount },
+          providerPayload: asJson({
+            ...payloadOf(card),
+            lastWithdraw: providerResult,
+            lastWithdrawTxId: pendingTx.id,
+          }),
+        },
+      });
+
+      await prisma.transaction.update({
+        where: { id: pendingTx.id },
+        data: {
+          providerRef: pagoTxId ?? providerRef,
+          metadata: asJson({
+            kind: "card_withdraw",
+            cardId: card.id,
+            providerCardId: card.providerCardId,
+            amountUsd: amount,
+            settleCurrency: "NGN",
+            awaitingWebhook: live,
+            pagoTxId,
+            walletTxId,
+            providerStatus,
+            raw: providerResult,
+          }),
+        },
+      });
+
+      // Simulated (or already-failed path): settle NGN now. Live waits for Pagocards webhook.
+      if (!live || providerStatus === "failed" || providerStatus === "fail") {
+        if (providerStatus === "failed" || providerStatus === "fail") {
+          await this.failWithdraw(pendingTx.id, amount, card.id, "Provider rejected withdrawal");
+          throw new AppError("Card withdrawal failed at Pagocards", 502);
+        }
+        const settled = await this.settleWithdrawToNgn({
+          transactionId: pendingTx.id,
+          eventId: `sim_${pendingTx.id}`,
+        });
+        if (!settled) throw new AppError("Could not settle simulated withdraw");
+        return {
+          transaction: settled.transaction,
+          card: toPublicCard(updated),
+          status: "SUCCESS",
+          ngnAmount: settled.ngnAmount,
+          rateApplied: settled.rateApplied,
+          providerResult,
+        };
+      }
+
+      return {
+        transaction: await prisma.transaction.findUniqueOrThrow({ where: { id: pendingTx.id } }),
+        card: toPublicCard(updated),
+        status: "PROCESSING",
+        message: "Withdrawal submitted. NGN will credit after Pagocards confirms via webhook.",
+        providerResult,
+      };
+    } catch (error) {
+      const stillPending = await prisma.transaction.findUnique({ where: { id: pendingTx.id } });
+      if (stillPending?.status === "PROCESSING") {
+        await prisma.transaction.update({
+          where: { id: pendingTx.id },
+          data: { status: "FAILED", description: `Withdraw failed: ${error instanceof Error ? error.message : "error"}` },
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async failWithdraw(transactionId: string, amountUsd: number, cardId: string, reason: string) {
+    await prisma.transaction.update({
+      where: { id: transactionId },
+      data: { status: "FAILED", description: reason },
+    });
+    await prisma.card.update({
+      where: { id: cardId },
+      data: { balance: { increment: amountUsd } },
+    });
+  }
+
+  /**
+   * Credit user NGN after Pagocards confirms the card withdraw (webhook or simulated settle).
+   * Idempotent on eventId / already-SUCCESS transaction.
+   */
+  async settleWithdrawToNgn(input: {
+    transactionId?: string;
+    providerCardId?: string;
+    pagoTxId?: string;
+    eventId?: string;
+    amountUsd?: number;
+  }) {
+    const settleRef = input.eventId ?? input.pagoTxId;
+    if (settleRef) {
+      const alreadyCredited = await prisma.transaction.findFirst({
+        where: {
+          type: "CARD_WITHDRAW",
+          status: "SUCCESS",
+          currency: "NGN",
+          providerRef: settleRef,
+        },
+      });
+      if (alreadyCredited) {
+        const meta = asRecord(alreadyCredited.metadata);
+        return {
+          transaction: alreadyCredited,
+          ngnAmount: Number(meta.ngnAmount ?? alreadyCredited.amount),
+          rateApplied: Number(meta.rateApplied ?? 0),
+        };
+      }
+    }
+
+    const pending = await this.findPendingWithdraw(input);
+    if (!pending) return null;
+    if (pending.status === "SUCCESS") {
+      const meta = asRecord(pending.metadata);
+      return {
+        transaction: pending,
+        ngnAmount: Number(meta.ngnAmount ?? 0),
+        rateApplied: Number(meta.rateApplied ?? 0),
+      };
+    }
+    if (pending.status !== "PROCESSING") return null;
+
+    const meta = asRecord(pending.metadata);
+    const amountUsd = Number(meta.amountUsd ?? pending.amount);
+    if (!(amountUsd > 0)) throw new AppError("Invalid withdraw amount");
+
+    const quote = await fxService.quote(pending.userId, {
+      fromCurrency: "USD",
+      toCurrency: "NGN",
+      amount: amountUsd,
+    });
+    const ngnAmount = Math.round(quote.toAmount * 100) / 100;
+
+    const creditTx = await walletService.credit({
+      userId: pending.userId,
+      currency: "NGN",
+      amount: ngnAmount,
+      type: "CARD_WITHDRAW",
+      description: `Card withdraw $${amountUsd} → ₦${ngnAmount.toLocaleString("en-US")}`,
+      provider: pending.provider ?? "pagocards",
+      providerRef: settleRef ?? pending.providerRef ?? pending.id,
+      metadata: asJson({
+        kind: "card_withdraw_ngn_credit",
+        sourceTransactionId: pending.id,
+        amountUsd,
+        ngnAmount,
+        rateApplied: quote.rateApplied,
+        eventId: input.eventId,
+      }),
+    });
+
+    const updated = await prisma.transaction.update({
+      where: { id: pending.id },
+      data: {
+        status: "SUCCESS",
+        description: `Withdraw $${amountUsd} → ₦${ngnAmount.toLocaleString("en-US")} credited`,
+        metadata: asJson({
+          ...meta,
+          awaitingWebhook: false,
+          settledAt: new Date().toISOString(),
+          ngnAmount,
+          rateApplied: quote.rateApplied,
+          ngnCreditTxId: creditTx.id,
+          settleEventId: input.eventId,
+        }),
+      },
+    });
+
+    await createInboxMessage({
+      userId: pending.userId,
+      category: "transaction",
+      title: "Card withdraw settled",
+      body: `$${amountUsd} left your Visa card. ₦${ngnAmount.toLocaleString("en-US")} was added to your NGN wallet.`,
+    });
+
+    return { transaction: updated, ngnAmount, rateApplied: quote.rateApplied, creditTx };
+  }
+
+  private async findPendingWithdraw(input: {
+    transactionId?: string;
+    providerCardId?: string;
+    pagoTxId?: string;
+    amountUsd?: number;
+  }) {
+    if (input.transactionId) {
+      return prisma.transaction.findFirst({
+        where: { id: input.transactionId, type: "CARD_WITHDRAW" },
+      });
+    }
+
+    if (input.pagoTxId) {
+      const byRef = await prisma.transaction.findFirst({
+        where: { type: "CARD_WITHDRAW", providerRef: input.pagoTxId },
+        orderBy: { createdAt: "desc" },
+      });
+      if (byRef) return byRef;
+
+      const funding = await prisma.cardFunding.findFirst({
+        where: { direction: "WITHDRAW", providerRef: input.pagoTxId },
+        include: { transaction: true },
+      });
+      if (funding?.transaction) return funding.transaction;
+    }
+
+    if (input.providerCardId) {
+      const card = await prisma.card.findFirst({
+        where: { providerCardId: input.providerCardId },
+      });
+      if (!card) return null;
+      const candidates = await prisma.transaction.findMany({
+        where: {
+          userId: card.userId,
+          type: "CARD_WITHDRAW",
+          status: "PROCESSING",
+        },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      });
+      return (
+        candidates.find((t) => {
+          const m = asRecord(t.metadata);
+          if (m.cardId !== card.id) return false;
+          if (input.amountUsd != null && Math.abs(Number(t.amount) - input.amountUsd) > 0.009) return false;
+          return true;
+        }) ?? null
+      );
+    }
+
+    return null;
   }
 
   async freeze(userId: string, cardId: string) {
