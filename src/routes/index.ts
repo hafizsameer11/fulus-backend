@@ -79,6 +79,7 @@ apiRouter.post("/kyc/face", requireAuth, asyncHandler(kycController.verifyFace))
 apiRouter.get("/cards", requireAuth, asyncHandler(cardsController.list));
 apiRouter.post("/cards", requireAuth, asyncHandler(cardsController.create));
 apiRouter.get("/cards/:id", requireAuth, asyncHandler(cardsController.get));
+apiRouter.post("/cards/:id/reveal", requireAuth, asyncHandler(cardsController.reveal));
 apiRouter.post("/cards/:id/fund", requireAuth, asyncHandler(cardsController.fund));
 apiRouter.post("/cards/:id/freeze", requireAuth, asyncHandler(cardsController.freeze));
 apiRouter.post("/cards/:id/unfreeze", requireAuth, asyncHandler(cardsController.unfreeze));

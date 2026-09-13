@@ -21,6 +21,11 @@ export class CardsController {
     return ok(res, await cardsService.get(req.user.id, String(req.params.id)));
   };
 
+  reveal = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await cardsService.reveal(req.user.id, String(req.params.id)));
+  };
+
   create = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();
     const input = createCardSchema.parse(req.body);
