@@ -92,6 +92,19 @@ export class BushaClient {
     return this.request("/v1/rates", { query });
   }
 
+  /** GET /v1/pairs — buy/sell prices (e.g. BTCNGN). */
+  listPairs(query?: { id?: string; type?: string; currency?: string; counter?: string; base?: string }) {
+    return this.request("/v1/pairs", {
+      query: {
+        id: query?.id,
+        type: query?.type,
+        currency: query?.currency,
+        counter: query?.counter,
+        base: query?.base,
+      },
+    });
+  }
+
   createQuote(body: Record<string, unknown>, customerId?: string) {
     return this.request("/v1/quotes", { method: "POST", body, profileId: customerId });
   }

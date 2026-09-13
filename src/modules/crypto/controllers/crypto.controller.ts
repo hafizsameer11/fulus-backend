@@ -36,7 +36,7 @@ export class CryptoController {
       });
       customerId = user?.bushaCustomerId ?? undefined;
     }
-    return ok(res, await cryptoService.createQuote(input, customerId));
+    return ok(res, await cryptoService.createQuote(input, customerId, req.user?.id));
   };
 
   listOrders = async (req: Request, res: Response) => {
