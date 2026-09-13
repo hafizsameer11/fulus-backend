@@ -43,7 +43,8 @@ function stripDataUrl(image: string): string {
 
 function namesFromPrembly(result: unknown, fallbackFirst?: string | null, fallbackLast?: string | null) {
   const root = asRecord(result);
-  const ninData = asRecord(root.nin_data ?? root.data);
+  // Latest Prembly NIN+face puts identity under `data`; older payloads use `nin_data`.
+  const ninData = { ...asRecord(root.data), ...asRecord(root.nin_data) };
   const first =
     String(ninData.firstname ?? ninData.first_name ?? fallbackFirst ?? "Customer").trim() || "Customer";
   const last =
@@ -158,8 +159,9 @@ export class BushaCustomerService {
         bushaCustomerStatus: status,
         dateOfBirth: input.dateOfBirth,
         nin: input.nin,
-        firstName: user.firstName ?? firstName,
-        lastName: user.lastName ?? lastName,
+        // Prefer Prembly legal names over any prior profile nickname
+        firstName,
+        lastName,
       },
     });
 

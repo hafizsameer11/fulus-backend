@@ -230,7 +230,7 @@ export class KycService {
   private async processNin(checkId: string, userId: string, input: z.infer<typeof ninSchema>) {
     try {
       const result = usePremblyLive()
-        ? await premblyClient.verifyNinWithFace(input.number, input.image)
+        ? await premblyClient.verifyNinWithFace(input.number, input.image, input.dateOfBirth)
         : {
             simulated: true,
             status: true,
@@ -355,7 +355,7 @@ export class KycService {
         // Prefer NIN+face if NIN on file
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (user?.nin && user.nin.length === 11) {
-          const result = await premblyClient.verifyNinWithFace(user.nin, input.image);
+          const result = await premblyClient.verifyNinWithFace(user.nin, input.image, user.dateOfBirth ?? undefined);
           if (!this.isPassed(result) || !this.faceMatched(result)) {
             await this.failCheck(
               checkId,

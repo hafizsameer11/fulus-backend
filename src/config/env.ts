@@ -18,6 +18,7 @@ const envSchema = z.object({
   BUSHA_SECRET_KEY: z.string().optional().default(""),
   BUSHA_PUBLIC_KEY: z.string().optional().default(""),
   BUSHA_PROFILE_ID: z.string().optional().default(""),
+  BUSHA_WEBHOOK_SECRET: z.string().optional().default(""),
 
   PREMBLY_BASE_URL: z.string().url().default("https://api.prembly.com"),
   PREMBLY_API_KEY: z.string().optional().default(""),
