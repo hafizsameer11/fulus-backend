@@ -44,15 +44,111 @@ function payloadOf(card: { providerPayload: unknown }) {
     : {}) as Record<string, unknown>;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type CardRow = Awaited<ReturnType<typeof prisma.card.findFirst>> & object;
+
+function hasSensitiveDetails(card: { expMonth: number | null; expYear: number | null; providerPayload: unknown }) {
+  const p = payloadOf(card);
+  const pan = pickPagoString(p, ["pan", "card_number", "cardnumber"]);
+  const cvv = pickPagoString(p, ["cvv", "cvc"]);
+  return Boolean(pan && cvv && card.expMonth && card.expYear);
+}
+
+function extractSensitive(data: Record<string, unknown>) {
+  const pan = pickPagoString(data, ["card_number", "cardnumber", "pan", "cardNumber"]);
+  const cvv = pickPagoString(data, ["cvv", "cvc"]);
+  const expiredate = pickPagoString(data, ["expiredate", "expire_date", "expiry"]);
+  let expMonth = Number(data.expiry_month ?? data.exp_month);
+  let expYear = Number(data.expiry_year ?? data.exp_year);
+  if (expiredate) {
+    const m = expiredate.match(/^(\d{1,2})\s*\/\s*(\d{2,4})$/);
+    if (m) {
+      expMonth = Number(m[1]);
+      const yy = Number(m[2]);
+      expYear = yy < 100 ? 2000 + yy : yy;
+    }
+  }
+  const last4 =
+    pickPagoString(data, ["last_four", "lastfour", "last4", "last_4"]) ??
+    (pan && pan.replace(/\D/g, "").length >= 4 ? pan.replace(/\D/g, "").slice(-4) : undefined);
+  return {
+    pan,
+    cvv,
+    expiredate,
+    last4,
+    expMonth: Number.isFinite(expMonth) && expMonth >= 1 && expMonth <= 12 ? expMonth : undefined,
+    expYear: Number.isFinite(expYear) && expYear > 2000 ? expYear : undefined,
+    balance: pagoDisplayBalance(data),
+    providerStatus: pickPagoString(data, ["status"]),
+  };
+}
+
 export class CardsService {
+  /**
+   * 493-BIN create responses often omit PAN/CVV; Pagocards fills them on GET.
+   * @see https://pagocards.com/documentation — Get Card
+   */
+  private async syncProviderDetails(
+    card: NonNullable<CardRow>,
+    opts: { onlyIfMissing?: boolean; retries?: number } = {},
+  ) {
+    if (!usePagocardsLive() || !card.providerCardId) return card;
+    if (opts.onlyIfMissing && hasSensitiveDetails(card)) return card;
+
+    const attempts = Math.max(1, opts.retries ?? 1);
+    let latest = card;
+
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) await sleep(800 * i);
+      try {
+        const raw = await pagocardsClient.getCard(card.providerCardId);
+        const data = pagoPayloadData(raw);
+        const sens = extractSensitive(data);
+        if (!sens.pan && !sens.cvv && !sens.expMonth) {
+          latest = card;
+          continue;
+        }
+
+        latest = await prisma.card.update({
+          where: { id: card.id },
+          data: {
+            ...(sens.last4 ? { last4: sens.last4 } : {}),
+            ...(sens.expMonth != null ? { expMonth: sens.expMonth } : {}),
+            ...(sens.expYear != null ? { expYear: sens.expYear } : {}),
+            ...(Number.isFinite(sens.balance) ? { balance: sens.balance } : {}),
+            providerPayload: asJson({
+              ...payloadOf(card),
+              ...(sens.pan ? { pan: sens.pan, card_number: sens.pan } : {}),
+              ...(sens.cvv ? { cvv: sens.cvv } : {}),
+              ...(sens.expiredate ? { expiredate: sens.expiredate } : {}),
+              ...(sens.providerStatus ? { providerStatus: sens.providerStatus } : {}),
+              detailsSyncedAt: new Date().toISOString(),
+              rawGet: raw,
+            }),
+          },
+        });
+
+        if (hasSensitiveDetails(latest)) return latest;
+      } catch {
+        // Keep last known row; caller can still show masked card.
+      }
+    }
+
+    return latest;
+  }
+
   async list(userId: string) {
-    return prisma.card.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
+    const cards = await prisma.card.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
+    return Promise.all(cards.map((c) => this.syncProviderDetails(c, { onlyIfMissing: true })));
   }
 
   async get(userId: string, cardId: string) {
     const card = await prisma.card.findFirst({ where: { id: cardId, userId } });
     if (!card) throw new NotFoundError("Card not found");
-    return card;
+    return this.syncProviderDetails(card, { onlyIfMissing: false, retries: hasSensitiveDetails(card) ? 1 : 2 });
   }
 
   async create(userId: string, input: z.infer<typeof createCardSchema>) {
@@ -79,6 +175,7 @@ export class CardsService {
         const last4 = simLast4();
         const providerCardId = simRef("CARD");
         const now = new Date();
+        const pan = `49372410${String(10000000 + Number(last4)).slice(-8)}`;
         return prisma.card.create({
           data: {
             userId,
@@ -94,8 +191,11 @@ export class CardsService {
             balance: 0,
             providerPayload: asJson({
               simulated: true,
+              pan,
+              card_number: pan,
+              cvv: "123",
+              expiredate: `12/${String((now.getFullYear() + 3) % 100).padStart(2, "0")}`,
               panMasked: `4937********${last4}`,
-              cvv: "FAKE",
               issuanceFeeUsd: issuanceFee,
               issuanceFeeTxId: feeTx.id,
               billing: {
@@ -116,34 +216,38 @@ export class CardsService {
 
       const data = pagoPayloadData(providerResult);
       const providerCardId = pickPagoString(data, ["card_id", "cardid", "id", "cardId"]);
-      const last4 = pickPagoString(data, ["last_four", "lastfour", "last4", "last_4"]);
-      const expMonth = Number(data.expiry_month ?? data.exp_month);
-      const expYear = Number(data.expiry_year ?? data.exp_year);
+      const createdSens = extractSensitive(data);
       const balance = pagoDisplayBalance(data);
       const providerStatus = pickPagoString(data, ["status"]);
 
-      return prisma.card.create({
+      const created = await prisma.card.create({
         data: {
           userId,
           provider: "pagocards",
           providerCardId,
           brand: "VISA",
           binHint: PAGO_VISA_BIN_HINT,
-          last4,
-          ...(Number.isFinite(expMonth) && expMonth >= 1 && expMonth <= 12 ? { expMonth } : {}),
-          ...(Number.isFinite(expYear) && expYear > 2000 ? { expYear } : {}),
+          last4: createdSens.last4,
+          ...(createdSens.expMonth != null ? { expMonth: createdSens.expMonth } : {}),
+          ...(createdSens.expYear != null ? { expYear: createdSens.expYear } : {}),
           label: input.label ?? "Fulus Visa",
           status: providerCardId ? "ACTIVE" : "PENDING",
           balance,
           providerPayload: asJson({
             product_code: data.product_code ?? "us_493_visa_bin",
             providerStatus,
+            ...(createdSens.pan ? { pan: createdSens.pan, card_number: createdSens.pan } : {}),
+            ...(createdSens.cvv ? { cvv: createdSens.cvv } : {}),
+            ...(createdSens.expiredate ? { expiredate: createdSens.expiredate } : {}),
             raw: providerResult,
             issuanceFeeUsd: issuanceFee,
             issuanceFeeTxId: feeTx.id,
           }),
         },
       });
+
+      // Create often returns null PAN/CVV — pull from GET with a short retry.
+      return this.syncProviderDetails(created, { retries: 3 });
     } catch (error) {
       await walletService.credit({
         userId,
