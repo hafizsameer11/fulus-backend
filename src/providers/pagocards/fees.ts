@@ -7,9 +7,16 @@ export const PAGO_VISA = {
   /** Card issuance — 493-BIN */
   issuanceFeeUsd: 0.65,
   /**
+   * Amount Pagocards loads onto a new 493-BIN card when `initial_load` is omitted.
+   * Do not call POST …/fund for this amount after create — it double-loads the card.
+   */
+  defaultInitialLoadUsd: 5,
+  /**
    * Minimum top-up via POST /api/v1/cards/{id}/fund.
    * (Create-time `initial_load`, if used, has a separate $10 minimum.)
    */
+  minFundUsd: 5,
+  /** @deprecated use minFundUsd — kept for mobile compatibility */
   minInitialFundUsd: 5,
   /** Flat portion of every card load — 493-BIN */
   fundFeeFlatUsd: 0.15,
@@ -26,4 +33,13 @@ export function pagoVisaFundFeeUsd(amount: number): number {
 /** Total debited from the user wallet so `amount` reaches the card after Pagocards fees. */
 export function pagoVisaFundDebitUsd(amount: number): number {
   return Math.round((amount + pagoVisaFundFeeUsd(amount)) * 100) / 100;
+}
+
+/**
+ * Extra amount to POST …/fund so the card ends at `desiredOnCardUsd`
+ * after Pagocards' default create-time load.
+ */
+export function pagoVisaExtraFundUsd(desiredOnCardUsd: number): number {
+  const extra = Math.round((desiredOnCardUsd - PAGO_VISA.defaultInitialLoadUsd) * 100) / 100;
+  return extra > 0 ? extra : 0;
 }

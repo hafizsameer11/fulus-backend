@@ -5,13 +5,23 @@ import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { pagocardsClient } from "../../../providers/pagocards/client.js";
 import { PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
-import { PAGO_VISA, pagoVisaFundDebitUsd, pagoVisaFundFeeUsd } from "../../../providers/pagocards/fees.js";
+import {
+  PAGO_VISA,
+  pagoVisaExtraFundUsd,
+  pagoVisaFundDebitUsd,
+  pagoVisaFundFeeUsd,
+} from "../../../providers/pagocards/fees.js";
 import { extractPagoCardSecrets, pagoDisplayBalance, pagoPayloadData, pickPagoString } from "../../../providers/pagocards/parse.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { simLast4, simRef, usePagocardsLive } from "../../../lib/simulate.js";
 
 export const createCardSchema = z.object({
   label: z.string().min(1).max(40).optional(),
+  /**
+   * Desired balance on the card after create.
+   * Pagocards already loads $5 by default — we only POST …/fund for the excess.
+   */
+  initialFund: z.number().positive().max(2500).optional(),
 });
 
 export const fundCardSchema = z.object({
@@ -203,105 +213,281 @@ export class CardsService {
       throw new AppError("Complete your profile name before issuing a Visa card");
     }
 
+    const desiredOnCard = Math.round((input.initialFund ?? PAGO_VISA.defaultInitialLoadUsd) * 100) / 100;
+    if (desiredOnCard < PAGO_VISA.defaultInitialLoadUsd) {
+      throw new AppError(`Minimum card balance is $${PAGO_VISA.defaultInitialLoadUsd}`, 400);
+    }
+    const extraFund = pagoVisaExtraFundUsd(desiredOnCard);
+    // Pagocards fund endpoint minimum is $5 — extras below that can't be topped up separately.
+    if (extraFund > 0 && extraFund < PAGO_VISA.minFundUsd) {
+      throw new AppError(
+        `Choose $${PAGO_VISA.defaultInitialLoadUsd} or at least $${PAGO_VISA.defaultInitialLoadUsd + PAGO_VISA.minFundUsd} (fund minimum is $${PAGO_VISA.minFundUsd} above the default load)`,
+        400,
+      );
+    }
+
     const issuanceFee = PAGO_VISA.issuanceFeeUsd;
-    // Debit issuance first so we never issue a card we cannot collect for.
+    const defaultLoad = PAGO_VISA.defaultInitialLoadUsd;
+    const defaultLoadFee = pagoVisaFundFeeUsd(defaultLoad);
+    const defaultDebit = pagoVisaFundDebitUsd(defaultLoad);
+    const extraLoadFee = extraFund > 0 ? pagoVisaFundFeeUsd(extraFund) : 0;
+    const extraDebit = extraFund > 0 ? pagoVisaFundDebitUsd(extraFund) : 0;
+    const live = usePagocardsLive();
+
+    // Debit issuance + default Pagocards load (auto-applied on create — do not fund again).
     const feeTx = await walletService.debit({
       userId,
       currency: "USD",
       amount: issuanceFee,
       type: "FEE",
       description: `Visa card issuance fee ($${issuanceFee})`,
-      provider: usePagocardsLive() ? "pagocards" : "simulated",
+      provider: live ? "pagocards" : "simulated",
       metadata: { kind: "card_issuance", amountUsd: issuanceFee },
     });
 
+    let defaultFundTxId: string | undefined;
     try {
-      if (!usePagocardsLive()) {
-        const last4 = simLast4();
-        const providerCardId = simRef("CARD");
-        const now = new Date();
-        const pan = `49372410${String(10000000 + Number(last4)).slice(-8)}`;
-        const created = await prisma.card.create({
+      const defaultFundTx = await walletService.debit({
+        userId,
+        currency: "USD",
+        amount: defaultDebit,
+        type: "CARD_FUND",
+        description: `Visa card default load ($${defaultLoad} + $${defaultLoadFee} fee)`,
+        provider: live ? "pagocards" : "simulated",
+        metadata: {
+          kind: "card_default_initial_load",
+          cardAmount: defaultLoad,
+          loadFeeUsd: defaultLoadFee,
+          feeFormula: "$0.15 + 0.75%",
+        },
+      });
+      defaultFundTxId = defaultFundTx.id;
+
+      let extraFundTxId: string | undefined;
+      if (extraFund > 0) {
+        const extraFundTx = await walletService.debit({
+          userId,
+          currency: "USD",
+          amount: extraDebit,
+          type: "CARD_FUND",
+          description: `Visa card extra load ($${extraFund} + $${extraLoadFee} fee)`,
+          provider: live ? "pagocards" : "simulated",
+          metadata: {
+            kind: "card_extra_initial_load",
+            cardAmount: extraFund,
+            loadFeeUsd: extraLoadFee,
+            feeFormula: "$0.15 + 0.75%",
+          },
+        });
+        extraFundTxId = extraFundTx.id;
+      }
+
+      const refundCreateDebits = async () => {
+        await walletService.credit({
+          userId,
+          currency: "USD",
+          amount: issuanceFee,
+          type: "ADJUSTMENT",
+          description: "Refund Visa card issuance fee (create failed)",
+          provider: "pagocards",
+          metadata: { kind: "card_issuance_refund", feeTxId: feeTx.id },
+        });
+        if (defaultFundTxId) {
+          await walletService.credit({
+            userId,
+            currency: "USD",
+            amount: defaultDebit,
+            type: "ADJUSTMENT",
+            description: "Refund Visa card default load (create failed)",
+            provider: "pagocards",
+            metadata: { kind: "card_default_initial_load_refund", feeTxId: defaultFundTxId },
+          });
+        }
+        if (extraFundTxId) {
+          await walletService.credit({
+            userId,
+            currency: "USD",
+            amount: extraDebit,
+            type: "ADJUSTMENT",
+            description: "Refund Visa card extra load (create failed)",
+            provider: "pagocards",
+            metadata: { kind: "card_extra_initial_load_refund", feeTxId: extraFundTxId },
+          });
+        }
+      };
+
+      try {
+        if (!live) {
+          const last4 = simLast4();
+          const providerCardId = simRef("CARD");
+          const now = new Date();
+          const pan = `49372410${String(10000000 + Number(last4)).slice(-8)}`;
+          const created = await prisma.card.create({
+            data: {
+              userId,
+              provider: "pagocards",
+              providerCardId,
+              brand: "VISA",
+              binHint: PAGO_VISA_BIN_HINT,
+              last4,
+              expMonth: 12,
+              expYear: now.getFullYear() + 3,
+              label: input.label ?? "Fulus Visa",
+              status: "ACTIVE",
+              balance: desiredOnCard,
+              providerPayload: asJson({
+                simulated: true,
+                pan,
+                card_number: pan,
+                cvv: "123",
+                expiredate: `12/${String((now.getFullYear() + 3) % 100).padStart(2, "0")}`,
+                panMasked: `4937********${last4}`,
+                issuanceFeeUsd: issuanceFee,
+                issuanceFeeTxId: feeTx.id,
+                defaultInitialLoadUsd: defaultLoad,
+                defaultFundTxId,
+                extraFundUsd: extraFund,
+                extraFundTxId,
+                billing: {
+                  line1: "1 Admiralty Way",
+                  city: "Lagos",
+                  country: "NG",
+                },
+              }),
+            },
+          });
+          await prisma.cardFunding.create({
+            data: {
+              cardId: created.id,
+              transactionId: defaultFundTx.id,
+              amount: defaultLoad,
+              direction: "FUND",
+              providerRef: makeReference("PCD"),
+            },
+          });
+          if (extraFund > 0 && extraFundTxId) {
+            await prisma.cardFunding.create({
+              data: {
+                cardId: created.id,
+                transactionId: extraFundTxId,
+                amount: extraFund,
+                direction: "FUND",
+                providerRef: makeReference("PCE"),
+              },
+            });
+          }
+          return toPublicCard(created);
+        }
+
+        // Omit initial_load — Pagocards applies defaultInitialLoadUsd ($5) automatically.
+        const providerResult = await pagocardsClient.createVisaCard({
+          first_name: user.firstName,
+          last_name: user.lastName,
+          email: user.email,
+        });
+
+        const createdSens = extractPagoCardSecrets(providerResult);
+        const data = createdSens.data;
+        const providerCardId = pickPagoString(data, ["card_id", "cardid", "id", "cardId"]);
+        const providerBalance =
+          Number.isFinite(createdSens.balance) && createdSens.balance > 0
+            ? createdSens.balance
+            : defaultLoad;
+
+        let created = await prisma.card.create({
           data: {
             userId,
             provider: "pagocards",
             providerCardId,
             brand: "VISA",
             binHint: PAGO_VISA_BIN_HINT,
-            last4,
-            expMonth: 12,
-            expYear: now.getFullYear() + 3,
+            last4: createdSens.last4,
+            ...(createdSens.expMonth != null ? { expMonth: createdSens.expMonth } : {}),
+            ...(createdSens.expYear != null ? { expYear: createdSens.expYear } : {}),
             label: input.label ?? "Fulus Visa",
-            status: "ACTIVE",
-            balance: 0,
+            status: providerCardId ? "ACTIVE" : "PENDING",
+            balance: providerBalance,
             providerPayload: asJson({
-              simulated: true,
-              pan,
-              card_number: pan,
-              cvv: "123",
-              expiredate: `12/${String((now.getFullYear() + 3) % 100).padStart(2, "0")}`,
-              panMasked: `4937********${last4}`,
+              product_code: data.product_code ?? "us_493_visa_bin",
+              providerStatus: createdSens.providerStatus,
+              ...(createdSens.pan ? { pan: createdSens.pan, card_number: createdSens.pan } : {}),
+              ...(createdSens.cvv ? { cvv: createdSens.cvv } : {}),
+              ...(createdSens.expiredate ? { expiredate: createdSens.expiredate } : {}),
+              raw: providerResult,
               issuanceFeeUsd: issuanceFee,
               issuanceFeeTxId: feeTx.id,
-              billing: {
-                line1: "1 Admiralty Way",
-                city: "Lagos",
-                country: "NG",
-              },
+              defaultInitialLoadUsd: defaultLoad,
+              defaultFundTxId,
+              desiredOnCardUsd: desiredOnCard,
             }),
           },
         });
-        return toPublicCard(created);
+
+        await prisma.cardFunding.create({
+          data: {
+            cardId: created.id,
+            transactionId: defaultFundTx.id,
+            amount: defaultLoad,
+            direction: "FUND",
+            providerRef: makeReference("PCD"),
+          },
+        });
+
+        // Only fund the amount above Pagocards' default $5 create load.
+        if (extraFund > 0 && providerCardId && extraFundTxId) {
+          const fundResult = await pagocardsClient.fundVisaCard({
+            card_id: providerCardId,
+            amount: extraFund,
+          });
+          const fundData = pagoPayloadData(fundResult);
+          const fundedDisplay = pagoDisplayBalance(fundData);
+
+          created = await prisma.card.update({
+            where: { id: created.id },
+            data: {
+              balance:
+                fundedDisplay > 0
+                  ? fundedDisplay
+                  : Math.round((Number(created.balance) + extraFund) * 100) / 100,
+              providerPayload: asJson({
+                ...payloadOf(created),
+                extraFundUsd: extraFund,
+                extraFundTxId,
+                lastExtraFund: fundResult,
+              }),
+            },
+          });
+
+          await prisma.cardFunding.create({
+            data: {
+              cardId: created.id,
+              transactionId: extraFundTxId,
+              amount: extraFund,
+              direction: "FUND",
+              providerRef: makeReference("PCE"),
+            },
+          });
+        }
+
+        // Create often returns null PAN/CVV — pull from GET with a short retry.
+        return toPublicCard(await this.syncProviderDetails(created, { retries: 4 }));
+      } catch (error) {
+        await refundCreateDebits();
+        throw error;
       }
-
-      const providerResult = await pagocardsClient.createVisaCard({
-        first_name: user.firstName,
-        last_name: user.lastName,
-        email: user.email,
-      });
-
-      const createdSens = extractPagoCardSecrets(providerResult);
-      const data = createdSens.data;
-      const providerCardId = pickPagoString(data, ["card_id", "cardid", "id", "cardId"]);
-
-      const created = await prisma.card.create({
-        data: {
-          userId,
-          provider: "pagocards",
-          providerCardId,
-          brand: "VISA",
-          binHint: PAGO_VISA_BIN_HINT,
-          last4: createdSens.last4,
-          ...(createdSens.expMonth != null ? { expMonth: createdSens.expMonth } : {}),
-          ...(createdSens.expYear != null ? { expYear: createdSens.expYear } : {}),
-          label: input.label ?? "Fulus Visa",
-          status: providerCardId ? "ACTIVE" : "PENDING",
-          balance: createdSens.balance,
-          providerPayload: asJson({
-            product_code: data.product_code ?? "us_493_visa_bin",
-            providerStatus: createdSens.providerStatus,
-            ...(createdSens.pan ? { pan: createdSens.pan, card_number: createdSens.pan } : {}),
-            ...(createdSens.cvv ? { cvv: createdSens.cvv } : {}),
-            ...(createdSens.expiredate ? { expiredate: createdSens.expiredate } : {}),
-            raw: providerResult,
-            issuanceFeeUsd: issuanceFee,
-            issuanceFeeTxId: feeTx.id,
-          }),
-        },
-      });
-
-      // Create often returns null PAN/CVV — pull from GET with a short retry.
-      return toPublicCard(await this.syncProviderDetails(created, { retries: 4 }));
     } catch (error) {
-      await walletService.credit({
-        userId,
-        currency: "USD",
-        amount: issuanceFee,
-        type: "ADJUSTMENT",
-        description: "Refund Visa card issuance fee (create failed)",
-        provider: "pagocards",
-        metadata: { kind: "card_issuance_refund", feeTxId: feeTx.id },
-      });
+      // Issuance debit succeeded but default fund debit failed — refund issuance only.
+      if (!defaultFundTxId) {
+        await walletService.credit({
+          userId,
+          currency: "USD",
+          amount: issuanceFee,
+          type: "ADJUSTMENT",
+          description: "Refund Visa card issuance fee (create failed)",
+          provider: "pagocards",
+          metadata: { kind: "card_issuance_refund", feeTxId: feeTx.id },
+        });
+      }
       throw error;
     }
   }
@@ -313,9 +499,8 @@ export class CardsService {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundError("User not found");
 
-    const priorFunds = await prisma.cardFunding.count({ where: { cardId: card.id, direction: "FUND" } });
-    if (priorFunds === 0 && input.amount < PAGO_VISA.minInitialFundUsd) {
-      throw new AppError(`Minimum initial card fund is $${PAGO_VISA.minInitialFundUsd}`, 400);
+    if (input.amount < PAGO_VISA.minFundUsd) {
+      throw new AppError(`Minimum card fund is $${PAGO_VISA.minFundUsd}`, 400);
     }
 
     const loadFee = pagoVisaFundFeeUsd(input.amount);
