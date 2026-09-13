@@ -32,6 +32,10 @@ export const limitsCardSchema = z.object({
   dailyLimit: z.number().positive().optional(),
   monthlyLimit: z.number().positive().optional(),
   perTxLimit: z.number().positive().optional(),
+  onlineEnabled: z.boolean().optional(),
+  contactlessEnabled: z.boolean().optional(),
+  atmEnabled: z.boolean().optional(),
+  intlEnabled: z.boolean().optional(),
 });
 
 function asJson(value: unknown): Prisma.InputJsonValue {
@@ -409,6 +413,10 @@ export class CardsService {
           dailyLimit: input.dailyLimit ?? null,
           monthlyLimit: input.monthlyLimit ?? null,
           perTxLimit: input.perTxLimit ?? null,
+          ...(input.onlineEnabled != null ? { onlineEnabled: input.onlineEnabled } : {}),
+          ...(input.contactlessEnabled != null ? { contactlessEnabled: input.contactlessEnabled } : {}),
+          ...(input.atmEnabled != null ? { atmEnabled: input.atmEnabled } : {}),
+          ...(input.intlEnabled != null ? { intlEnabled: input.intlEnabled } : {}),
           limits: {
             dailyLimit: input.dailyLimit ?? null,
             monthlyLimit: input.monthlyLimit ?? null,
