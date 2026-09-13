@@ -41,10 +41,48 @@ const SIM_RATES: Record<string, number> = {
   ETH: 3500,
   USDT: 1,
   USDC: 1,
+  SOL: 180,
+  BNB: 600,
+  XRP: 0.6,
+  LTC: 90,
 };
+
+const SIM_COINS = [
+  { code: "BTC", name: "Bitcoin", type: "crypto", decimals: "8", icon: null },
+  { code: "ETH", name: "Ethereum", type: "crypto", decimals: "18", icon: null },
+  { code: "USDT", name: "Tether", type: "stablecoin", decimals: "6", icon: null },
+  { code: "USDC", name: "USD Coin", type: "stablecoin", decimals: "6", icon: null },
+  { code: "SOL", name: "Solana", type: "crypto", decimals: "9", icon: null },
+  { code: "BNB", name: "BNB", type: "crypto", decimals: "8", icon: null },
+  { code: "XRP", name: "XRP", type: "crypto", decimals: "6", icon: null },
+  { code: "LTC", name: "Litecoin", type: "crypto", decimals: "8", icon: null },
+];
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function unwrapList(payload: unknown): Record<string, unknown>[] {
+  if (Array.isArray(payload)) return payload.map((x) => asRecord(x));
+  const root = asRecord(payload);
+  if (Array.isArray(root.data)) return root.data.map((x) => asRecord(x));
+  return [];
+}
+
+function amountOf(row: Record<string, unknown>, key: string): number {
+  const v = row[key];
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return Number(v) || 0;
+  if (v && typeof v === "object") {
+    const a = (v as Record<string, unknown>).amount;
+    if (typeof a === "number") return a;
+    if (typeof a === "string") return Number(a) || 0;
+  }
+  return 0;
 }
 
 async function ensureCryptoWallet(userId: string, currency: WalletCurrency) {
@@ -55,9 +93,83 @@ async function ensureCryptoWallet(userId: string, currency: WalletCurrency) {
   });
 }
 
+/** NIN must be PASSED before crypto trading / send / receive. */
+async function requireNinKyc(userId: string) {
+  const nin = await prisma.kycCheck.findFirst({
+    where: { userId, type: "NIN" },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!nin || nin.status !== "PASSED") {
+    if (nin?.status === "PENDING") {
+      throw new AppError(
+        "Your NIN verification is under review. Crypto unlocks after Prembly approves.",
+        403,
+        "KYC_UNDER_REVIEW",
+      );
+    }
+    throw new AppError(
+      "Complete NIN verification with a selfie before using crypto.",
+      403,
+      "KYC_REQUIRED",
+    );
+  }
+}
+
 export class CryptoService {
+  async coins() {
+    if (useBushaLive()) {
+      try {
+        const crypto = unwrapList(await bushaClient.listCurrencies({ type: "crypto" }));
+        const stable = unwrapList(await bushaClient.listCurrencies({ type: "stablecoin" }));
+        const merged = [...crypto, ...stable];
+        if (merged.length) {
+          return merged.map((c) => ({
+            code: String(c.code ?? "").toUpperCase(),
+            name: String(c.name ?? c.display_name ?? c.code ?? ""),
+            displayName: String(c.display_name ?? c.name ?? c.code ?? ""),
+            type: String(c.type ?? "crypto"),
+            decimals: String(c.decimals ?? c.precision ?? "8"),
+            icon: typeof c.icon === "string" ? c.icon : null,
+            deposit: Boolean(c.deposit ?? true),
+            withdrawal: Boolean(c.withdrawal ?? true),
+            defaultNetwork: typeof c.default_network === "string" ? c.default_network : null,
+            supportedNetworks: Array.isArray(c.supported_networks) ? c.supported_networks : [],
+            provider: "busha",
+          })).filter((c) => c.code);
+        }
+      } catch (err) {
+        console.error("[crypto] listCurrencies failed", err);
+      }
+    }
+
+    return SIM_COINS.map((c) => ({
+      ...c,
+      displayName: `${c.name} (${c.code})`,
+      deposit: true,
+      withdrawal: true,
+      defaultNetwork: null,
+      supportedNetworks: [],
+      provider: "simulated",
+      simulated: true,
+    }));
+  }
+
   async balances(userId: string) {
-    if (useBushaLive()) return bushaClient.listBalances();
+    await requireNinKyc(userId);
+
+    if (useBushaLive()) {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      const raw = await bushaClient.listBalances(user?.bushaCustomerId ?? undefined);
+      return unwrapList(raw).map((b) => ({
+        currency: String(b.currency ?? "").toUpperCase(),
+        name: typeof b.name === "string" ? b.name : undefined,
+        type: typeof b.type === "string" ? b.type : undefined,
+        available: amountOf(b, "available"),
+        pending: amountOf(b, "pending"),
+        total: amountOf(b, "total"),
+        provider: "busha",
+      })).filter((b) => b.currency && b.type !== "fiat");
+    }
 
     for (const c of ["USDT", "BTC", "ETH"] as WalletCurrency[]) {
       await ensureCryptoWallet(userId, c);
@@ -74,7 +186,18 @@ export class CryptoService {
   }
 
   async rates() {
-    if (useBushaLive()) return bushaClient.getRates();
+    if (useBushaLive()) {
+      const raw = await bushaClient.getRates();
+      const list = unwrapList(raw);
+      if (list.length) {
+        return list.map((r) => ({
+          currency: String(r.currency ?? r.code ?? r.base_currency ?? "").toUpperCase(),
+          usd: Number(r.usd ?? r.price_usd ?? r.rate ?? r.price ?? 0),
+          provider: "busha",
+        })).filter((r) => r.currency);
+      }
+      return raw;
+    }
     return Object.entries(SIM_RATES).map(([currency, usd]) => ({
       currency,
       usd,
@@ -94,15 +217,15 @@ export class CryptoService {
 
     const amount = Number(input.amount);
     const baseUsd = SIM_RATES[input.baseCurrency.toUpperCase()] ?? 1;
-    const quoteUsd = SIM_RATES[input.quoteCurrency.toUpperCase()] ?? (input.quoteCurrency === "NGN" ? 1 / 1580 : input.quoteCurrency === "SAR" ? 1 / 3.75 : 1);
+    const quoteUsd =
+      SIM_RATES[input.quoteCurrency.toUpperCase()] ??
+      (input.quoteCurrency === "NGN" ? 1 / 1580 : input.quoteCurrency === "SAR" ? 1 / 3.75 : 1);
 
     let receiveAmount: number;
     if (input.side === "BUY") {
-      // pay quoteCurrency amount, receive baseCurrency
       const payUsd = amount * (input.quoteCurrency === "USD" ? 1 : quoteUsd);
       receiveAmount = payUsd / baseUsd;
     } else {
-      // sell baseCurrency amount, receive quoteCurrency
       const sellUsd = amount * baseUsd;
       receiveAmount = sellUsd / (input.quoteCurrency === "USD" ? 1 : quoteUsd);
     }
@@ -128,6 +251,8 @@ export class CryptoService {
   }
 
   async createOrder(userId: string, input: z.infer<typeof createOrderSchema>) {
+    await requireNinKyc(userId);
+
     const amount = Number(input.amount);
     const debitCurrency = (input.side === "BUY" ? input.quoteCurrency : input.baseCurrency) as WalletCurrency;
     const creditCurrency = (input.side === "BUY" ? input.baseCurrency : input.quoteCurrency) as WalletCurrency;
@@ -170,7 +295,6 @@ export class CryptoService {
         })) as Record<string, unknown>;
       } else {
         providerResult = { simulated: true, id: simRef("BU") };
-        // Credit the other side locally
         if (["NGN", "USD", "SAR", "USDT", "BTC", "ETH"].includes(creditCurrency)) {
           await walletService.credit({
             userId,
@@ -217,6 +341,8 @@ export class CryptoService {
   }
 
   async getOrCreateAddress(userId: string, input: z.infer<typeof receiveSchema>) {
+    await requireNinKyc(userId);
+
     const currency = input.currency.toUpperCase();
     const network = input.network;
     const existing = await prisma.cryptoAddress.findUnique({
@@ -224,9 +350,7 @@ export class CryptoService {
     });
     if (existing) return existing;
 
-    const address = useBushaLive()
-      ? simCryptoAddress(currency, network, userId) // live address create not wired yet
-      : simCryptoAddress(currency, network, userId);
+    const address = simCryptoAddress(currency, network, userId);
 
     return prisma.cryptoAddress.create({
       data: {
@@ -244,6 +368,8 @@ export class CryptoService {
   }
 
   async send(userId: string, input: z.infer<typeof sendSchema>) {
+    await requireNinKyc(userId);
+
     const currency = input.currency.toUpperCase() as WalletCurrency;
     if (!["USDT", "BTC", "ETH"].includes(currency)) {
       throw new AppError("Unsupported crypto currency");
@@ -274,6 +400,8 @@ export class CryptoService {
 
   /** Simulate an inbound crypto deposit credit (demo faucet). */
   async simulateReceive(userId: string, input: z.infer<typeof receiveSchema> & { amount?: number }) {
+    await requireNinKyc(userId);
+
     const currency = input.currency.toUpperCase() as WalletCurrency;
     await ensureCryptoWallet(userId, currency);
     const amount = input.amount ?? (currency === "BTC" ? 0.001 : currency === "ETH" ? 0.05 : 25);
@@ -290,6 +418,47 @@ export class CryptoService {
     });
 
     return { transaction, address, amount };
+  }
+
+  /** Soft status for mobile gate UI (does not throw). */
+  async kycGate(userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        kycStatus: true,
+        kycTier: true,
+        bushaCustomerId: true,
+        bushaCustomerStatus: true,
+      },
+    });
+    if (!user) throw new NotFoundError("User not found");
+
+    const nin = await prisma.kycCheck.findFirst({
+      where: { userId, type: "NIN" },
+      orderBy: { createdAt: "desc" },
+    });
+
+    let state: "required" | "under_review" | "ready" | "rejected" = "required";
+    if (nin?.status === "PASSED") state = "ready";
+    else if (nin?.status === "PENDING") state = "under_review";
+    else if (nin?.status === "FAILED") state = "rejected";
+
+    return {
+      state,
+      kycStatus: user.kycStatus,
+      kycTier: user.kycTier,
+      ninStatus: nin?.status ?? null,
+      bushaCustomerId: user.bushaCustomerId,
+      bushaCustomerStatus: user.bushaCustomerStatus,
+      message:
+        state === "ready"
+          ? null
+          : state === "under_review"
+            ? "Your NIN verification is under review. Crypto unlocks when Prembly finishes."
+            : state === "rejected"
+              ? "Your NIN verification was rejected. Update your details and resubmit."
+              : "Complete NIN verification with a selfie to unlock crypto.",
+    };
   }
 }
 

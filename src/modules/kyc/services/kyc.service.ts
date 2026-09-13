@@ -5,6 +5,7 @@ import { premblyClient } from "../../../providers/prembly/client.js";
 import { usePremblyLive } from "../../../lib/simulate.js";
 import { AppError } from "../../../lib/errors.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
+import { bushaCustomerService } from "../../busha/services/busha-customer.service.js";
 
 export const bvnSchema = z.object({
   number: z.string().regex(/^\d{11}$/, "BVN must be 11 digits"),
@@ -15,6 +16,8 @@ export const bvnSchema = z.object({
 export const ninSchema = z.object({
   number: z.string().regex(/^\d{11}$/, "NIN must be 11 digits"),
   dateOfBirth: z.string().min(4).max(32),
+  /** Base64 or data-URL selfie — required for Prembly NIN+face + Busha KYC */
+  image: z.string().min(40, "Selfie image is required"),
 });
 
 export const addressSchema = z.object({
@@ -44,7 +47,9 @@ function asJson(value: unknown): Prisma.InputJsonValue {
 function extractPremblyReason(result: unknown, fallback: string): string {
   if (!result || typeof result !== "object") return fallback;
   const r = result as Record<string, unknown>;
+  const face = r.face_data && typeof r.face_data === "object" ? (r.face_data as Record<string, unknown>) : null;
   const candidates = [
+    face?.message,
     r.detail,
     r.message,
     r.response_message,
@@ -102,14 +107,21 @@ export class KycService {
   }
 
   async verifyNin(userId: string, input: z.infer<typeof ninSchema>) {
-    const check = await this.beginCheck(userId, "NIN", input);
+    // Do not persist raw selfie bytes in DB input — keep metadata only.
+    const check = await this.beginCheck(userId, "NIN", {
+      number: input.number,
+      dateOfBirth: input.dateOfBirth,
+      hasImage: true,
+    });
+    // Mirror selfie step as FACE pending so crypto / profile can show under-review.
+    await this.beginCheckQuiet(userId, "FACE", { hasImage: true, source: "nin" });
+
     runInBackground(`nin:${check.id}`, () => this.processNin(check.id, userId, input));
     return check;
   }
 
   async verifyAddress(userId: string, input: z.infer<typeof addressSchema>) {
     const check = await this.beginCheck(userId, "ADDRESS", input);
-    // No Prembly address API in client yet — queue for async review / simulate pass.
     runInBackground(`address:${check.id}`, () => this.processAddress(check.id, userId, input));
     return check;
   }
@@ -136,11 +148,29 @@ export class KycService {
       );
     }
 
-    // Mark user as under review while checks are pending
     await prisma.user.update({
       where: { id: userId },
       data: { kycStatus: "PENDING" },
     });
+
+    return prisma.kycCheck.create({
+      data: {
+        userId,
+        type,
+        status: "PENDING",
+        provider: usePremblyLive() ? "prembly" : "simulated",
+        input: asJson(input),
+      },
+    });
+  }
+
+  /** Same as beginCheck but skip if already pending (used for paired FACE row). */
+  private async beginCheckQuiet(userId: string, type: KycCheckType, input: Record<string, unknown>) {
+    const existingPending = await prisma.kycCheck.findFirst({
+      where: { userId, type, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existingPending) return existingPending;
 
     return prisma.kycCheck.create({
       data: {
@@ -200,27 +230,60 @@ export class KycService {
   private async processNin(checkId: string, userId: string, input: z.infer<typeof ninSchema>) {
     try {
       const result = usePremblyLive()
-        ? await premblyClient.verifyNin(input.number)
+        ? await premblyClient.verifyNinWithFace(input.number, input.image)
         : {
             simulated: true,
             status: true,
             verified: true,
-            data: { nin: input.number, dateOfBirth: input.dateOfBirth },
+            face_data: { status: true, message: "Face Match", confidence: 99 },
+            nin_data: { nin: input.number, birthdate: input.dateOfBirth },
           };
 
-      const passed = this.isPassed(result);
+      const passed = this.isPassed(result) && this.faceMatched(result);
       if (!passed) {
         await this.failCheck(
           checkId,
           userId,
           "NIN",
           result,
-          extractPremblyReason(result, "NIN could not be verified with Prembly"),
+          extractPremblyReason(result, "NIN or selfie could not be verified with Prembly"),
         );
+        await this.failLatestPending(userId, "FACE", result, "Selfie did not match NIN records");
         return;
       }
 
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          nin: input.number,
+          dateOfBirth: input.dateOfBirth,
+        },
+      });
+
       await this.passCheck(checkId, userId, "NIN", result);
+      await this.passLatestPendingOrCreate(userId, "FACE", result);
+
+      // Prembly approved → create Busha customer + submit KYC with NIN + DOB + selfie
+      try {
+        await bushaCustomerService.createFromNinKyc({
+          userId,
+          nin: input.number,
+          dateOfBirth: input.dateOfBirth,
+          selfieImage: input.image,
+          premblyResult: result,
+        });
+      } catch (err) {
+        console.error("[kyc] busha customer create failed", err);
+        await createInboxMessage({
+          userId,
+          category: "kyc",
+          title: "Busha KYC pending",
+          body:
+            err instanceof Error
+              ? `NIN passed, but Busha customer setup failed: ${err.message}`
+              : "NIN passed, but Busha customer setup failed. Support will retry.",
+        });
+      }
     } catch (error) {
       await this.failCheck(
         checkId,
@@ -229,12 +292,17 @@ export class KycService {
         null,
         error instanceof Error ? error.message : "Prembly NIN provider error",
       );
+      await this.failLatestPending(
+        userId,
+        "FACE",
+        null,
+        error instanceof Error ? error.message : "Face verification failed with NIN",
+      );
     }
   }
 
   private async processAddress(checkId: string, userId: string, input: z.infer<typeof addressSchema>) {
     try {
-      // Prembly has no wired address endpoint yet — accept in simulate; keep pending→pass with review note in live.
       const result = {
         provider: usePremblyLive() ? "prembly-deferred" : "simulated",
         verified: true,
@@ -258,7 +326,6 @@ export class KycService {
 
   private async processFace(checkId: string, userId: string, input: z.infer<typeof faceSchema>) {
     try {
-      // Prefer Prembly BVN+face when we have an image and a passed BVN on file.
       if (usePremblyLive() && input.image) {
         const bvnCheck = await prisma.kycCheck.findFirst({
           where: { userId, type: "BVN", status: "PASSED" },
@@ -284,6 +351,24 @@ export class KycService {
           await this.passCheck(checkId, userId, "FACE", result);
           return;
         }
+
+        // Prefer NIN+face if NIN on file
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (user?.nin && user.nin.length === 11) {
+          const result = await premblyClient.verifyNinWithFace(user.nin, input.image);
+          if (!this.isPassed(result) || !this.faceMatched(result)) {
+            await this.failCheck(
+              checkId,
+              userId,
+              "FACE",
+              result,
+              extractPremblyReason(result, "Face match with Prembly failed"),
+            );
+            return;
+          }
+          await this.passCheck(checkId, userId, "FACE", result);
+          return;
+        }
       }
 
       const result = {
@@ -293,12 +378,10 @@ export class KycService {
         hasImage: Boolean(input.image),
         selfieToken: input.selfieToken,
         note: usePremblyLive()
-          ? "Face submitted — complete BVN first for Prembly face match, or await review"
+          ? "Face submitted — complete NIN with selfie first for Prembly face match"
           : "Simulated face pass",
       };
 
-      // Live without BVN+image: leave as soft pass so Tier 3 isn't permanently blocked,
-      // but notify that Prembly face match needs BVN.
       if (usePremblyLive() && !input.image) {
         await this.failCheck(
           checkId,
@@ -320,6 +403,38 @@ export class KycService {
         error instanceof Error ? error.message : "Face verification failed",
       );
     }
+  }
+
+  private async passLatestPendingOrCreate(userId: string, type: KycCheckType, result: unknown) {
+    const pending = await prisma.kycCheck.findFirst({
+      where: { userId, type, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+    });
+    if (pending) {
+      await this.passCheck(pending.id, userId, type, result);
+      return;
+    }
+    const created = await prisma.kycCheck.create({
+      data: {
+        userId,
+        type,
+        status: "PASSED",
+        provider: usePremblyLive() ? "prembly" : "simulated",
+        input: asJson({ source: "nin" }),
+        result: asJson(result),
+      },
+    });
+    await this.syncTier(userId);
+    void created;
+  }
+
+  private async failLatestPending(userId: string, type: KycCheckType, result: unknown, reason: string) {
+    const pending = await prisma.kycCheck.findFirst({
+      where: { userId, type, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!pending) return;
+    await this.failCheck(pending.id, userId, type, result, reason);
   }
 
   private async passCheck(checkId: string, userId: string, type: KycCheckType, result: unknown) {
@@ -364,6 +479,20 @@ export class KycService {
     });
   }
 
+  private faceMatched(result: unknown) {
+    if (!result || typeof result !== "object") return true;
+    const r = result as Record<string, unknown>;
+    const face = r.face_data;
+    if (!face || typeof face !== "object") return true;
+    const f = face as Record<string, unknown>;
+    if (typeof f.status === "boolean") return f.status;
+    if (typeof f.status === "string") {
+      const s = f.status.toLowerCase();
+      return s === "true" || s === "success" || s === "matched" || s === "face match";
+    }
+    return true;
+  }
+
   private isPassed(result: unknown) {
     if (!result || typeof result !== "object") return false;
     const r = result as Record<string, unknown>;
@@ -375,7 +504,7 @@ export class KycService {
       if (s === "success" || s === "verified" || s === "true") return true;
       if (s === "failed" || s === "false" || s === "error") return false;
     }
-    return Boolean(r.data);
+    return Boolean(r.data || r.nin_data);
   }
 
   private async syncTier(userId: string) {

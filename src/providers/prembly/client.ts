@@ -45,6 +45,11 @@ export class PremblyClient {
     return this.request("/identitypass/verification/vnin", { number });
   }
 
+  /** NIN + face match — https://docs.prembly.com/reference/nin-with-face */
+  verifyNinWithFace(number: string, image: string) {
+    return this.request("/identitypass/verification/nin_w_face", { number, image });
+  }
+
   verifyPhone(number: string) {
     return this.request("/identitypass/verification/phone_number", { number });
   }

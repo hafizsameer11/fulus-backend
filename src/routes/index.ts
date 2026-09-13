@@ -88,6 +88,8 @@ apiRouter.post("/cards/:id/limits", requireAuth, asyncHandler(cardsController.se
 apiRouter.post("/cards/:id/terminate", requireAuth, asyncHandler(cardsController.terminate));
 apiRouter.get("/cards/:id/statements", requireAuth, asyncHandler(cardsController.statements));
 
+apiRouter.get("/crypto/coins", requireAuth, asyncHandler(cryptoController.coins));
+apiRouter.get("/crypto/kyc-gate", requireAuth, asyncHandler(cryptoController.kycGate));
 apiRouter.get("/crypto/balances", requireAuth, asyncHandler(cryptoController.balances));
 apiRouter.get("/crypto/rates", requireAuth, asyncHandler(cryptoController.rates));
 apiRouter.post("/crypto/quotes", requireAuth, asyncHandler(cryptoController.quote));

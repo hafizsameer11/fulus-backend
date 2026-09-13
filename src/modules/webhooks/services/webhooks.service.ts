@@ -5,6 +5,8 @@ import { strowalletClient } from "../../../providers/strowallet/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { AppError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import { createInboxMessage } from "../../../lib/inbox.js";
+import { bushaCustomerService } from "../../busha/services/busha-customer.service.js";
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -57,9 +59,157 @@ export class WebhooksService {
   }
 
   async handleBusha(payload: unknown) {
-    const event = await this.ingest("busha", payload, undefined, this.eventType(payload));
-    await prisma.webhookEvent.update({ where: { id: event.id }, data: { processed: true } });
-    return event;
+    const p = asRecord(payload);
+    const eventType = this.eventType(payload);
+    const event = await this.ingest("busha", payload, undefined, eventType);
+    const data = asRecord(p.data);
+
+    try {
+      if (eventType?.startsWith("customer.verification.") || eventType === "customer.updated") {
+        const customerId = str(data.id);
+        const status =
+          str(data.status) ??
+          (eventType === "customer.verification.active"
+            ? "active"
+            : eventType === "customer.verification.rejected"
+              ? "rejected"
+              : eventType === "customer.verification.in_review"
+                ? "in_review"
+                : eventType === "customer.verification.inactive"
+                  ? "inactive"
+                  : undefined);
+        if (customerId && status) {
+          await bushaCustomerService.syncStatusFromWebhook(
+            customerId,
+            status,
+            str(data.rejection_reason),
+          );
+        }
+      }
+
+      if (eventType === "deposit.success") {
+        await this.handleBushaDeposit(data);
+      }
+
+      if (
+        eventType === "transfer.completed" ||
+        eventType === "transfer.failed" ||
+        eventType === "transfer.cancelled" ||
+        eventType === "transfer.funds_converted"
+      ) {
+        await this.handleBushaTransfer(eventType, data);
+      }
+
+      return prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: true, error: null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Busha webhook processing failed";
+      await prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: false, error: message },
+      });
+      throw error;
+    }
+  }
+
+  private async handleBushaDeposit(data: Record<string, unknown>) {
+    const reference = str(data.reference) ?? str(data.id);
+    const profileId = str(data.profile_id);
+    const amount = num(data.amount) ?? 0;
+    const currency = str(data.currency)?.toUpperCase();
+    if (!reference || !amount || amount <= 0 || !currency) return;
+
+    const existing = await prisma.deposit.findFirst({
+      where: { provider: "busha", providerRef: reference },
+    });
+    if (existing) return;
+
+    const user = profileId
+      ? await prisma.user.findFirst({ where: { bushaCustomerId: profileId } })
+      : null;
+    if (!user) return;
+
+    // Only credit local fiat wallets we support
+    if (!["NGN", "USD", "SAR"].includes(currency)) {
+      await createInboxMessage({
+        userId: user.id,
+        category: "crypto",
+        title: "Crypto deposit received",
+        body: `Busha reported a ${amount} ${currency} deposit (${reference}).`,
+      });
+      return;
+    }
+
+    const tx = await walletService.credit({
+      userId: user.id,
+      currency: currency as "NGN" | "USD" | "SAR",
+      amount,
+      type: "DEPOSIT",
+      description: str(data.channel) ? `Busha ${String(data.channel)} deposit` : "Busha deposit",
+      provider: "busha",
+      providerRef: reference,
+      metadata: asJson(data),
+    });
+
+    await prisma.deposit.create({
+      data: {
+        userId: user.id,
+        transactionId: tx.id,
+        method: "CRYPTO",
+        currency: currency as "NGN" | "USD" | "SAR",
+        amount,
+        status: "SUCCESS",
+        provider: "busha",
+        providerRef: reference,
+        confirmedAt: new Date(),
+        metadata: asJson(data),
+        instructions: { reference },
+      },
+    });
+
+    await createInboxMessage({
+      userId: user.id,
+      category: "wallet",
+      title: "Deposit confirmed",
+      body: `${amount} ${currency} was credited from Busha.`,
+    });
+  }
+
+  private async handleBushaTransfer(eventType: string, data: Record<string, unknown>) {
+    const providerRef = str(data.id) ?? str(data.reference);
+    if (!providerRef) return;
+
+    const order = await prisma.cryptoOrder.findFirst({
+      where: { providerRef },
+    });
+    if (!order) return;
+
+    const status =
+      eventType === "transfer.completed" || eventType === "transfer.funds_converted"
+        ? "SUCCESS"
+        : eventType === "transfer.failed" || eventType === "transfer.cancelled"
+          ? "FAILED"
+          : order.status;
+
+    await prisma.cryptoOrder.update({
+      where: { id: order.id },
+      data: {
+        status,
+        providerPayload: asJson({ ...asRecord(order.providerPayload), webhook: data, eventType }),
+      },
+    });
+
+    if (order.transactionId) {
+      await prisma.transaction.update({
+        where: { id: order.transactionId },
+        data: {
+          status: status === "SUCCESS" ? "SUCCESS" : status === "FAILED" ? "FAILED" : "PROCESSING",
+          providerRef,
+        },
+      });
+    }
   }
 
   async handlePagocards(payload: unknown) {

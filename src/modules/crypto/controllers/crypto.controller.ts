@@ -11,6 +11,13 @@ import {
 import { z } from "zod";
 
 export class CryptoController {
+  coins = async (_req: Request, res: Response) => ok(res, await cryptoService.coins());
+
+  kycGate = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await cryptoService.kycGate(req.user.id));
+  };
+
   balances = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();
     return ok(res, await cryptoService.balances(req.user.id));

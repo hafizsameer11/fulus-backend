@@ -14,8 +14,9 @@ export function createApp() {
   }));
   app.use(cors({ origin: true, credentials: true }));
   app.use(morgan("dev"));
-  app.use(express.json({ limit: "2mb" }));
-  app.use(express.urlencoded({ extended: true }));
+  // Selfie / KYC payloads are base64 — allow a few MB
+  app.use(express.json({ limit: "8mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
   app.use("/api/v1", apiRouter);
 
