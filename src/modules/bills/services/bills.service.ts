@@ -270,11 +270,36 @@ export class BillsService {
     const svc = await prisma.billService.findUnique({ where: { id: input.serviceID } });
     const serviceName = svc?.providerCode ?? input.serviceID;
 
-    return strowalletClient.verifyMeter({
+    const raw = (await strowalletClient.verifyMeter({
       meter_number: input.billersCode,
       service_name: serviceName,
       meter_type: input.type,
-    });
+    })) as Record<string, unknown>;
+
+    const customerName = extractCustomerName(raw)?.trim();
+    if (!customerName) {
+      throw new AppError("Could not verify this meter. Check the number and disco, then try again.", 400, "METER_NOT_VERIFIED");
+    }
+
+    const address =
+      (typeof raw.address === "string" && raw.address.trim()) ||
+      (typeof raw.Address === "string" && raw.Address.trim()) ||
+      null;
+    const customerDistrict =
+      (typeof raw.customer_district === "string" && raw.customer_district.trim()) ||
+      (typeof raw.Customer_District === "string" && raw.Customer_District.trim()) ||
+      null;
+
+    return {
+      customerName,
+      customer_name: customerName,
+      address,
+      customerDistrict,
+      meterNumber: input.billersCode,
+      meterType: input.type,
+      serviceId: input.serviceID,
+      raw,
+    };
   }
 
   async pay(userId: string, input: z.infer<typeof payBillSchema>) {
