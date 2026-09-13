@@ -6,7 +6,7 @@ Express + TypeScript (ESM) backend for Fulus, using Prisma + MySQL and a control
 
 | Domain | Provider | Notes |
 | --- | --- | --- |
-| Virtual Visa / gift cards | [Pagocards](https://pagocards.com/documentation) | Visa BIN `43` via Visacard API |
+| Virtual Visa / gift cards | [Pagocards](https://pagocards.com/documentation) | Visa 493 BIN `us_493_visa_bin` via `/api/v1/cards` |
 | Crypto | [Busha](https://docs.busha.co/) | Balances, quotes, payments |
 | KYC | [Prembly](https://prembly.com/) | BVN / NIN / face checks |
 | Bill payments | [Strowallet](https://strowallet.readme.io/) | Airtime, data, electricity, cable |

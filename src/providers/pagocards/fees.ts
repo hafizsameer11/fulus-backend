@@ -1,5 +1,5 @@
 /**
- * Pagocards Visa (BIN 43 / Visacard API) published fees.
+ * Pagocards Visa 493 BIN (`us_493_visa_bin`) published fees.
  * Source of truth: https://pagocards.com/fees (VisaCard)
  * Docs also note initial loading and fund fees: https://pagocards.com/documentation
  *

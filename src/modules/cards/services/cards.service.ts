@@ -4,7 +4,9 @@ import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { pagocardsClient } from "../../../providers/pagocards/client.js";
+import { PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
 import { PAGO_VISA, pagoVisaFundDebitUsd, pagoVisaFundFeeUsd } from "../../../providers/pagocards/fees.js";
+import { pagoDisplayBalance, pagoPayloadData, pickPagoString } from "../../../providers/pagocards/parse.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { simLast4, simRef, usePagocardsLive } from "../../../lib/simulate.js";
 
@@ -34,14 +36,6 @@ export const limitsCardSchema = z.object({
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
-}
-
-function pickString(obj: Record<string, unknown>, keys: string[]) {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === "string" && value) return value;
-  }
-  return undefined;
 }
 
 function payloadOf(card: { providerPayload: unknown }) {
@@ -91,7 +85,7 @@ export class CardsService {
             provider: "pagocards",
             providerCardId,
             brand: "VISA",
-            binHint: "43",
+            binHint: PAGO_VISA_BIN_HINT,
             last4,
             expMonth: 12,
             expYear: now.getFullYear() + 3,
@@ -100,7 +94,7 @@ export class CardsService {
             balance: 0,
             providerPayload: asJson({
               simulated: true,
-              panMasked: `4300********${last4}`,
+              panMasked: `4937********${last4}`,
               cvv: "FAKE",
               issuanceFeeUsd: issuanceFee,
               issuanceFeeTxId: feeTx.id,
@@ -114,19 +108,19 @@ export class CardsService {
         });
       }
 
-      const providerResult = (await pagocardsClient.createVisaCard({
-        firstname: user.firstName,
-        lastname: user.lastName,
+      const providerResult = await pagocardsClient.createVisaCard({
+        first_name: user.firstName,
+        last_name: user.lastName,
         email: user.email,
-      })) as Record<string, unknown>;
+      });
 
-      const data =
-        providerResult.data && typeof providerResult.data === "object"
-          ? (providerResult.data as Record<string, unknown>)
-          : providerResult;
-
-      const providerCardId = pickString(data, ["cardid", "card_id", "id", "cardId"]);
-      const last4 = pickString(data, ["last4", "last_4", "card_last4"]);
+      const data = pagoPayloadData(providerResult);
+      const providerCardId = pickPagoString(data, ["card_id", "cardid", "id", "cardId"]);
+      const last4 = pickPagoString(data, ["last_four", "lastfour", "last4", "last_4"]);
+      const expMonth = Number(data.expiry_month ?? data.exp_month);
+      const expYear = Number(data.expiry_year ?? data.exp_year);
+      const balance = pagoDisplayBalance(data);
+      const providerStatus = pickPagoString(data, ["status"]);
 
       return prisma.card.create({
         data: {
@@ -134,12 +128,17 @@ export class CardsService {
           provider: "pagocards",
           providerCardId,
           brand: "VISA",
-          binHint: "43",
+          binHint: PAGO_VISA_BIN_HINT,
           last4,
+          ...(Number.isFinite(expMonth) && expMonth >= 1 && expMonth <= 12 ? { expMonth } : {}),
+          ...(Number.isFinite(expYear) && expYear > 2000 ? { expYear } : {}),
           label: input.label ?? "Fulus Visa",
           status: providerCardId ? "ACTIVE" : "PENDING",
+          balance,
           providerPayload: asJson({
-            ...providerResult,
+            product_code: data.product_code ?? "us_493_visa_bin",
+            providerStatus,
+            raw: providerResult,
             issuanceFeeUsd: issuanceFee,
             issuanceFeeTxId: feeTx.id,
           }),
@@ -193,11 +192,10 @@ export class CardsService {
     try {
       const providerResult = usePagocardsLive()
         ? await pagocardsClient.fundVisaCard({
-            cardid: card.providerCardId,
-            email: user.email,
+            card_id: card.providerCardId,
             amount: input.amount,
           })
-        : { simulated: true, funded: input.amount, cardid: card.providerCardId };
+        : { simulated: true, funded: input.amount, card_id: card.providerCardId };
 
       await prisma.cardFunding.create({
         data: {
@@ -209,10 +207,14 @@ export class CardsService {
         },
       });
 
+      const fundData = pagoPayloadData(providerResult);
+      const fundedDisplay = pagoDisplayBalance(fundData);
+      const balanceDelta = fundedDisplay > 0 ? fundedDisplay : input.amount;
+
       const updated = await prisma.card.update({
         where: { id: card.id },
         data: {
-          balance: { increment: input.amount },
+          balance: { increment: balanceDelta },
           providerPayload: asJson({
             ...payloadOf(card),
             lastFund: providerResult,
@@ -244,8 +246,7 @@ export class CardsService {
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready");
     if (usePagocardsLive()) {
-      const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-      await pagocardsClient.blockVisaCard({ cardid: card.providerCardId, email: user.email });
+      await pagocardsClient.blockVisaCard({ card_id: card.providerCardId });
     }
     return prisma.card.update({ where: { id: card.id }, data: { status: "FROZEN" } });
   }
@@ -254,8 +255,7 @@ export class CardsService {
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready");
     if (usePagocardsLive()) {
-      const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-      await pagocardsClient.unblockVisaCard({ cardid: card.providerCardId, email: user.email });
+      await pagocardsClient.unblockVisaCard({ card_id: card.providerCardId });
     }
     return prisma.card.update({ where: { id: card.id }, data: { status: "ACTIVE" } });
   }
@@ -318,6 +318,9 @@ export class CardsService {
 
   async terminate(userId: string, cardId: string) {
     const card = await this.get(userId, cardId);
+    if (usePagocardsLive() && card.providerCardId) {
+      await pagocardsClient.terminateCard({ card_id: card.providerCardId });
+    }
     return prisma.card.update({ where: { id: card.id }, data: { status: "TERMINATED" } });
   }
 
