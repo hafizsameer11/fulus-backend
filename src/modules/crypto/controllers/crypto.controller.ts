@@ -44,10 +44,20 @@ export class CryptoController {
     return ok(res, await cryptoService.listOrders(req.user.id));
   };
 
+  getOrder = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await cryptoService.getOrder(req.user.id, String(req.params.id)));
+  };
+
   createOrder = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();
     const input = createOrderSchema.parse(req.body);
     return created(res, await cryptoService.createOrder(req.user.id, input));
+  };
+
+  markPaid = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await cryptoService.markPaid(req.user.id, String(req.params.id)));
   };
 
   addresses = async (req: Request, res: Response) => {

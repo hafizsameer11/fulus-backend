@@ -97,6 +97,8 @@ apiRouter.get("/crypto/rates", requireAuth, asyncHandler(cryptoController.rates)
 apiRouter.post("/crypto/quotes", requireAuth, asyncHandler(cryptoController.quote));
 apiRouter.get("/crypto/orders", requireAuth, asyncHandler(cryptoController.listOrders));
 apiRouter.post("/crypto/orders", requireAuth, asyncHandler(cryptoController.createOrder));
+apiRouter.get("/crypto/orders/:id", requireAuth, asyncHandler(cryptoController.getOrder));
+apiRouter.post("/crypto/orders/:id/mark-paid", requireAuth, asyncHandler(cryptoController.markPaid));
 apiRouter.get("/crypto/addresses", requireAuth, asyncHandler(cryptoController.addresses));
 apiRouter.post("/crypto/addresses", requireAuth, asyncHandler(cryptoController.receiveAddress));
 apiRouter.post("/crypto/send", requireAuth, asyncHandler(cryptoController.send));

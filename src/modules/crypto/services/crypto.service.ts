@@ -180,6 +180,30 @@ function moneyAmount(value: unknown): number {
   return amountOf(row, "amount");
 }
 
+function extractTempBank(transfer: Record<string, unknown>) {
+  const payIn = asRecord(transfer.pay_in);
+  const details = asRecord(payIn.recipient_details);
+  return {
+    accountName: strOf(details, ["account_name", "accountName"]) ?? "",
+    accountNumber: strOf(details, ["account_number", "accountNumber"]) ?? "",
+    bankName: strOf(details, ["bank_name", "bankName"]) ?? "",
+    bankCode: strOf(details, ["bank_code", "bankCode"]) ?? null,
+    email: strOf(details, ["email"]) ?? null,
+    expiresAt: strOf(payIn, ["expires_at", "expiresAt"]) ?? strOf(transfer, ["expires_at"]) ?? null,
+    type: strOf(payIn, ["type"]) ?? "temporary_bank_account",
+  };
+}
+
+function withBankAccount<T extends { providerPayload?: unknown }>(order: T) {
+  const payload = asRecord(order.providerPayload);
+  return {
+    ...order,
+    bankAccount: payload.bankAccount ?? null,
+    receiptTransactionId: payload.receiptTransactionId ?? null,
+    userMarkedPaidAt: payload.userMarkedPaidAt ?? null,
+  };
+}
+
 export class CryptoService {
   async coins() {
     if (useBushaLive()) {
@@ -507,10 +531,99 @@ export class CryptoService {
   }
 
   async listOrders(userId: string) {
-    return prisma.cryptoOrder.findMany({
+    const orders = await prisma.cryptoOrder.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
     });
+    return orders.map((o) => withBankAccount(o));
+  }
+
+  async getOrder(userId: string, orderId: string) {
+    const order = await prisma.cryptoOrder.findFirst({ where: { id: orderId, userId } });
+    if (!order) throw new NotFoundError("Crypto order not found");
+    return withBankAccount(order);
+  }
+
+  /**
+   * User confirms they have transferred to the Busha temporary account.
+   * Settlement still waits for Busha webhook (or settles immediately in simulated mode).
+   */
+  async markPaid(userId: string, orderId: string) {
+    const order = await prisma.cryptoOrder.findFirst({ where: { id: orderId, userId } });
+    if (!order) throw new NotFoundError("Crypto order not found");
+    if (order.side !== "BUY") throw new AppError("Only buy orders can be marked paid");
+    if (order.status === "SUCCESS") return withBankAccount(order);
+    if (order.status === "FAILED") throw new AppError("This buy order failed — start a new one");
+
+    const payload = asRecord(order.providerPayload);
+    const updated = await prisma.cryptoOrder.update({
+      where: { id: order.id },
+      data: {
+        status: "PROCESSING",
+        providerPayload: asJson({
+          ...payload,
+          userMarkedPaidAt: new Date().toISOString(),
+          awaitingWebhook: order.provider !== "simulated",
+        }),
+      },
+    });
+    if (order.transactionId) {
+      const existing = await prisma.transaction.findUnique({
+        where: { id: order.transactionId },
+        select: { metadata: true },
+      });
+      await prisma.transaction.update({
+        where: { id: order.transactionId },
+        data: {
+          status: "PROCESSING",
+          metadata: asJson({
+            ...asRecord(existing?.metadata),
+            userMarkedPaidAt: new Date().toISOString(),
+          }),
+        },
+      });
+    }
+
+    // Demo / no Busha key: settle immediately after mark-paid.
+    if (order.provider === "simulated" || !useBushaLive()) {
+      const creditCurrency = String(payload.creditCurrency ?? order.baseCurrency).toUpperCase();
+      const creditAmount = Number(payload.creditAmount ?? order.quoteAmount ?? 0);
+      if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
+        await ensureCryptoWallet(userId, creditCurrency as WalletCurrency);
+      }
+      if (creditCurrency && creditAmount > 0 && !payload.creditSettled) {
+        const receipt = await walletService.credit({
+          userId,
+          currency: creditCurrency as WalletCurrency,
+          amount: creditAmount,
+          type: "CRYPTO_BUY",
+          description: `Buy ${creditCurrency} (bank transfer confirmed)`,
+          provider: "simulated",
+          providerRef: `${order.providerRef ?? order.id}_credit`,
+          metadata: asJson({ orderId: order.id, simulated: true }),
+        });
+        await prisma.cryptoOrder.update({
+          where: { id: order.id },
+          data: {
+            status: "SUCCESS",
+            providerPayload: asJson({
+              ...asRecord((await prisma.cryptoOrder.findUnique({ where: { id: order.id } }))?.providerPayload),
+              creditSettled: true,
+              receiptTransactionId: receipt.id,
+            }),
+          },
+        });
+        if (order.transactionId) {
+          await prisma.transaction.update({
+            where: { id: order.transactionId },
+            data: { status: "SUCCESS" },
+          });
+        }
+        return withBankAccount(await prisma.cryptoOrder.findUniqueOrThrow({ where: { id: order.id } }));
+      }
+    }
+
+    return withBankAccount(updated);
   }
 
   async createOrder(userId: string, input: z.infer<typeof createOrderSchema>) {
@@ -529,6 +642,12 @@ export class CryptoService {
 
     const live = useBushaLive();
     const customer = live ? await requireBushaCustomer(userId) : null;
+
+    // BUY: always fund via Busha temporary bank account (no PalmPay / wallet debit).
+    if (input.side === "BUY") {
+      return this.createBankBuyOrder(userId, input, customer?.bushaCustomerId ?? null, live);
+    }
+
     const quote = await this.createQuote(
       input,
       customer?.bushaCustomerId ?? undefined,
@@ -537,98 +656,21 @@ export class CryptoService {
     const receiveAmount = Number(quote.receive_amount ?? quote.target_amount ?? amount);
     const fxBridge = (quote as { fxBridge?: Record<string, unknown> | null }).fxBridge ?? null;
 
-    // BUY with USD/SAR: apply Fulus FX → NGN amount, debit user fiat, then Busha NGN→crypto.
-    if (live && input.side === "BUY" && fxBridge && String(fxBridge.direction) === "user_fiat_to_ngn") {
-      const ngnAmount = Number(fxBridge.toAmount);
-      if (!(ngnAmount > 0)) throw new AppError("FX bridge produced invalid NGN amount", 502);
-      const walletTx = await walletService.debit({
-        userId,
-        currency: debitCurrency,
-        amount,
-        type: "CRYPTO_BUY",
-        description: `Buy ${input.baseCurrency} with ${debitCurrency}`,
-        provider: "busha",
-        metadata: asJson({
-          kind: "crypto_order_debit",
-          side: "BUY",
-          creditCurrency,
-          creditAmount: receiveAmount,
-          fxBridge,
-        }),
-      });
-      try {
-        const quoteRaw = await bushaClient.createQuote(
-          {
-            source_currency: "NGN",
-            target_currency: input.baseCurrency.toUpperCase(),
-            source_amount: String(ngnAmount),
-            pay_in: { type: "balance" },
-            pay_out: { type: "balance" },
-          },
-          customer!.bushaCustomerId!,
-        );
-        const fresh = unwrapData(quoteRaw);
-        const quoteId = strOf(fresh, ["id"]);
-        if (!quoteId) throw new AppError("Busha quote missing id", 502);
-        const creditAmt =
-          Number(strOf(fresh, ["target_amount", "receive_amount"]) ?? receiveAmount) || receiveAmount;
-        const transferRaw = await bushaClient.createTransfer(
-          { quote_id: quoteId },
-          customer!.bushaCustomerId!,
-        );
-        const providerResult = unwrapData(transferRaw);
-        const providerRef = strOf(providerResult, ["id", "reference"]) ?? makeReference("BU");
-        return prisma.cryptoOrder.create({
-          data: {
-            userId,
-            transactionId: walletTx.id,
-            side: input.side,
-            baseCurrency: input.baseCurrency.toUpperCase(),
-            quoteCurrency: input.quoteCurrency.toUpperCase(),
-            amount,
-            quoteAmount: creditAmt,
-            rate: amount > 0 ? creditAmt / amount : 0,
-            network: input.network,
-            provider: "busha",
-            providerRef,
-            status: "PROCESSING",
-            providerPayload: asJson({
-              quote: { ...fresh, fxBridge },
-              transfer: providerResult,
-              creditCurrency,
-              creditAmount: creditAmt,
-              fxBridge,
-              awaitingWebhook: true,
-            }),
-          },
-        });
-      } catch (error) {
-        await walletService.credit({
-          userId,
-          currency: debitCurrency,
-          amount,
-          type: "ADJUSTMENT",
-          description: `Refund failed crypto buy ${walletTx.reference}`,
-          provider: "busha",
-        });
-        throw error;
-      }
-    }
-
     const walletTx = await walletService.debit({
       userId,
       currency: debitCurrency,
       amount,
-      type: input.side === "BUY" ? "CRYPTO_BUY" : "CRYPTO_SELL",
-      description: `${input.side} ${input.baseCurrency}/${input.quoteCurrency}`,
+      type: "CRYPTO_SELL",
+      description: `SELL ${input.baseCurrency}/${input.quoteCurrency}`,
       provider: live ? "busha" : "simulated",
       metadata: asJson({
         kind: "crypto_order_debit",
-        side: input.side,
+        side: "SELL",
         creditCurrency,
         creditAmount: receiveAmount,
         quoteId: quote.id,
         fxBridge,
+        walletDebited: true,
       }),
     });
 
@@ -654,40 +696,41 @@ export class CryptoService {
             userId,
             currency: creditCurrency,
             amount: receiveAmount,
-            type: input.side === "BUY" ? "CRYPTO_BUY" : "CRYPTO_SELL",
-            description: `${input.side} credit ${creditCurrency}`,
+            type: "CRYPTO_SELL",
+            description: `SELL credit ${creditCurrency}`,
             provider: "simulated",
             providerRef: walletTx.reference,
           });
         }
       }
 
-      const order = await prisma.cryptoOrder.create({
-        data: {
-          userId,
-          transactionId: walletTx.id,
-          side: input.side,
-          baseCurrency: input.baseCurrency.toUpperCase(),
-          quoteCurrency: input.quoteCurrency.toUpperCase(),
-          amount,
-          quoteAmount: receiveAmount,
-          rate: receiveAmount / amount,
-          network: input.network,
-          provider: live ? "busha" : "simulated",
-          providerRef,
-          status,
-          providerPayload: asJson({
-            quote,
-            transfer: providerResult,
-            creditCurrency,
-            creditAmount: receiveAmount,
-            fxBridge,
-            awaitingWebhook: live,
-          }),
-        },
-      });
-
-      return order;
+      return withBankAccount(
+        await prisma.cryptoOrder.create({
+          data: {
+            userId,
+            transactionId: walletTx.id,
+            side: input.side,
+            baseCurrency: input.baseCurrency.toUpperCase(),
+            quoteCurrency: input.quoteCurrency.toUpperCase(),
+            amount,
+            quoteAmount: receiveAmount,
+            rate: receiveAmount / amount,
+            network: input.network,
+            provider: live ? "busha" : "simulated",
+            providerRef,
+            status,
+            providerPayload: asJson({
+              quote,
+              transfer: providerResult,
+              creditCurrency,
+              creditAmount: receiveAmount,
+              fxBridge,
+              walletDebited: true,
+              awaitingWebhook: live,
+            }),
+          },
+        }),
+      );
     } catch (error) {
       await walletService.credit({
         userId,
@@ -699,6 +742,173 @@ export class CryptoService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Buy crypto by paying a Busha-generated temporary NGN bank account.
+   * USD/SAR amounts are FX-converted to NGN before the Busha quote (user still pays NGN to the bank).
+   */
+  private async createBankBuyOrder(
+    userId: string,
+    input: z.infer<typeof createOrderSchema>,
+    customerId: string | null,
+    live: boolean,
+  ) {
+    const amount = Number(input.amount);
+    const userFiat = input.quoteCurrency.toUpperCase();
+    const base = input.baseCurrency.toUpperCase();
+    const creditCurrency = base as WalletCurrency;
+
+    if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
+      await ensureCryptoWallet(userId, creditCurrency);
+    }
+
+    let ngnAmount = amount;
+    let fxBridge: Record<string, unknown> | null = null;
+    if (userFiat === "USD" || userFiat === "SAR") {
+      const fx = await fxService.quote(userId, {
+        fromCurrency: userFiat as "USD" | "SAR",
+        toCurrency: "NGN",
+        amount,
+      });
+      ngnAmount = Math.round(fx.toAmount * 100) / 100;
+      fxBridge = {
+        direction: "user_fiat_to_ngn",
+        fromCurrency: userFiat,
+        toCurrency: "NGN",
+        fromAmount: amount,
+        toAmount: ngnAmount,
+        rateApplied: fx.rateApplied,
+      };
+    } else if (userFiat !== "NGN") {
+      throw new AppError("Buy with bank transfer supports NGN, USD, or SAR only");
+    }
+    if (!(ngnAmount > 0)) throw new AppError("Invalid payment amount");
+
+    let transfer: Record<string, unknown>;
+    let quoteRaw: Record<string, unknown>;
+    let receiveAmount: number;
+    let providerRef: string;
+
+    if (live) {
+      if (!customerId) throw new AppError("Busha customer required", 403, "BUSHA_CUSTOMER_REQUIRED");
+      const q = unwrapData(
+        await bushaClient.createQuote(
+          {
+            source_currency: "NGN",
+            target_currency: base,
+            source_amount: String(ngnAmount),
+            pay_in: { type: "temporary_bank_account" },
+            pay_out: { type: "balance" },
+          },
+          customerId,
+        ),
+      );
+      const quoteId = strOf(q, ["id"]);
+      if (!quoteId) throw new AppError("Busha quote missing id", 502);
+      quoteRaw = q;
+      receiveAmount = Number(strOf(q, ["target_amount", "receive_amount"]) ?? 0);
+      transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, customerId));
+      providerRef = strOf(transfer, ["id", "reference"]) ?? makeReference("BU");
+      if (!(receiveAmount > 0)) {
+        receiveAmount = Number(strOf(transfer, ["target_amount", "receive_amount"]) ?? 0);
+      }
+    } else {
+      receiveAmount =
+        base === "USDT" || base === "USDC"
+          ? ngnAmount / 1580
+          : (SIM_RATES[base] ? ngnAmount / (SIM_RATES[base] * 1580) : ngnAmount / 1580);
+      providerRef = simRef("BU");
+      quoteRaw = {
+        id: simRef("CQ"),
+        source_currency: "NGN",
+        target_currency: base,
+        source_amount: String(ngnAmount),
+        target_amount: String(receiveAmount),
+        simulated: true,
+      };
+      transfer = {
+        id: providerRef,
+        simulated: true,
+        source_amount: String(ngnAmount),
+        target_amount: String(receiveAmount),
+        pay_in: {
+          type: "temporary_bank_account",
+          expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+          recipient_details: {
+            account_name: "Fulus Demo / Busha",
+            account_number: `70${String(Date.now()).slice(-8)}`,
+            bank_name: "Demo Microfinance Bank",
+            bank_code: "999999",
+          },
+        },
+      };
+    }
+
+    const bankAccount = {
+      ...extractTempBank(transfer),
+      amount: ngnAmount,
+      currency: "NGN",
+      userFiat,
+      userFiatAmount: amount,
+    };
+    if (!bankAccount.accountNumber) {
+      throw new AppError("Busha did not return temporary bank account details", 502);
+    }
+
+    const pendingTx = await prisma.transaction.create({
+      data: {
+        userId,
+        type: "CRYPTO_BUY",
+        status: "PENDING",
+        amount: ngnAmount,
+        currency: "NGN",
+        reference: makeReference("CBY"),
+        provider: live ? "busha" : "simulated",
+        providerRef,
+        description: `Buy ${base} · pay ₦${ngnAmount.toLocaleString()} to Busha bank`,
+        metadata: asJson({
+          kind: "crypto_bank_buy_pending",
+          side: "BUY",
+          creditCurrency,
+          creditAmount: receiveAmount,
+          bankAccount,
+          fxBridge,
+          walletDebited: false,
+          payInType: "temporary_bank_account",
+        }),
+      },
+    });
+
+    const order = await prisma.cryptoOrder.create({
+      data: {
+        userId,
+        transactionId: pendingTx.id,
+        side: "BUY",
+        baseCurrency: base,
+        quoteCurrency: userFiat,
+        amount,
+        quoteAmount: receiveAmount,
+        rate: amount > 0 ? receiveAmount / amount : 0,
+        network: input.network,
+        provider: live ? "busha" : "simulated",
+        providerRef,
+        status: "PENDING",
+        providerPayload: asJson({
+          quote: quoteRaw,
+          transfer,
+          creditCurrency,
+          creditAmount: receiveAmount,
+          bankAccount,
+          fxBridge,
+          walletDebited: false,
+          payInType: "temporary_bank_account",
+          awaitingWebhook: live,
+        }),
+      },
+    });
+
+    return withBankAccount(order);
   }
 
   async getOrCreateAddress(userId: string, input: z.infer<typeof receiveSchema>) {

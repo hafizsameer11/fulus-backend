@@ -96,7 +96,9 @@ export class WebhooksService {
         eventType === "transfer.completed" ||
         eventType === "transfer.failed" ||
         eventType === "transfer.cancelled" ||
-        eventType === "transfer.funds_converted"
+        eventType === "transfer.funds_converted" ||
+        eventType === "transfer.funds_received" ||
+        eventType === "transfer.funds_delivered"
       ) {
         await this.handleBushaTransfer(eventType, data);
       }
@@ -245,7 +247,8 @@ export class WebhooksService {
     const status =
       eventType === "transfer.completed" ||
       eventType === "transfer.funds_converted" ||
-      eventType === "transfer.funds_delivered"
+      eventType === "transfer.funds_delivered" ||
+      eventType === "transfer.funds_received"
         ? "SUCCESS"
         : eventType === "transfer.failed" || eventType === "transfer.cancelled"
           ? "FAILED"
@@ -280,6 +283,7 @@ export class WebhooksService {
         num(data.target_amount) ??
         Number(order.quoteAmount);
 
+      let receiptTransactionId: string | undefined;
       if (creditCurrency && creditAmount > 0) {
         const already = await prisma.transaction.findFirst({
           where: {
@@ -308,7 +312,7 @@ export class WebhooksService {
               update: {},
             });
           }
-          await walletService.credit({
+          const receipt = await walletService.credit({
             userId: order.userId,
             currency: creditCurrency as "NGN" | "USD" | "SAR" | "USDT" | "BTC" | "ETH",
             amount: creditAmount,
@@ -318,6 +322,9 @@ export class WebhooksService {
             providerRef: `${providerRef}_credit`,
             metadata: asJson({ orderId: order.id, eventType, webhook: data }),
           });
+          receiptTransactionId = receipt.id;
+        } else {
+          receiptTransactionId = already.id;
         }
       }
 
@@ -325,18 +332,28 @@ export class WebhooksService {
         where: { id: order.id },
         data: {
           providerPayload: asJson({
-            ...asRecord(order.providerPayload),
+            ...payload,
             webhook: data,
             eventType,
             creditSettled: true,
+            ...(receiptTransactionId ? { receiptTransactionId } : {}),
           }),
         },
       });
     }
 
     if (status === "FAILED" && order.transactionId) {
+      const payload = asRecord(order.providerPayload);
+      // Bank-funded buys never debited the wallet — nothing to refund.
+      if (payload.walletDebited === false || payload.payInType === "temporary_bank_account") {
+        await prisma.transaction.update({
+          where: { id: order.transactionId },
+          data: { status: "FAILED" },
+        });
+        return;
+      }
       const debitTx = await prisma.transaction.findUnique({ where: { id: order.transactionId } });
-      if (debitTx && debitTx.status !== "REVERSED") {
+      if (debitTx && debitTx.status !== "REVERSED" && debitTx.status !== "FAILED") {
         await walletService.credit({
           userId: order.userId,
           currency: debitTx.currency,
