@@ -4,8 +4,16 @@ import { webhooksService } from "../services/webhooks.service.js";
 
 export class WebhooksController {
   esimGo = async (req: Request, res: Response) => {
-    const rawBody = typeof req.body === "string" ? req.body : JSON.stringify(req.body ?? {});
-    const signature = req.header("X-Signature-SHA256") ?? undefined;
+    const rawBody =
+      typeof req.rawBody === "string"
+        ? req.rawBody
+        : typeof req.body === "string"
+          ? req.body
+          : JSON.stringify(req.body ?? {});
+    const signature =
+      req.header("X-Signature-SHA256") ??
+      req.header("x-signature-sha256") ??
+      undefined;
     const payload = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body;
     const event = await webhooksService.handleEsimGo(rawBody, signature, payload);
     return ok(res, { id: event.id, processed: true });

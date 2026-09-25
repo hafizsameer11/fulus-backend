@@ -39,6 +39,11 @@ export class EsimController {
     if (!req.user) throw new UnauthorizedError();
     return ok(res, await esimService.usage(req.user.id, String(req.params.id)));
   };
+
+  sync = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await esimService.sync(req.user.id, String(req.params.id)));
+  };
 }
 
 export const esimController = new EsimController();

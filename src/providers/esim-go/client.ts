@@ -51,14 +51,43 @@ export class EsimGoClient {
     return this.request(`/catalogue/bundle/${encodeURIComponent(name)}`);
   }
 
+  /**
+   * OpenAPI body shape: { type, assign?, order: [{ type: "bundle", item, quantity, iccids? }] }
+   * Quick-start also documents a flat { type, item, quantity, assign, iccid } form — we use OpenAPI.
+   */
+  private orderBody(input: {
+    type: "validate" | "transaction";
+    item: string;
+    quantity?: number;
+    assign?: boolean;
+    iccid?: string;
+    allowReassign?: boolean;
+  }) {
+    const line: Record<string, unknown> = {
+      type: "bundle",
+      quantity: input.quantity ?? 1,
+      item: input.item,
+      allowReassign: input.allowReassign ?? Boolean(input.iccid),
+    };
+    if (input.iccid?.trim()) {
+      line.iccids = [input.iccid.trim()];
+    }
+    return {
+      type: input.type,
+      assign: input.assign ?? true,
+      order: [line],
+    };
+  }
+
   validateOrder(input: { item: string; quantity?: number }) {
     return this.request("/orders", {
       method: "POST",
-      body: {
+      body: this.orderBody({
         type: "validate",
-        quantity: input.quantity ?? 1,
         item: input.item,
-      },
+        quantity: input.quantity,
+        assign: true,
+      }),
     });
   }
 
@@ -67,22 +96,25 @@ export class EsimGoClient {
     quantity?: number;
     assign?: boolean;
     iccid?: string;
+    allowReassign?: boolean;
   }) {
     return this.request("/orders", {
       method: "POST",
-      body: {
+      body: this.orderBody({
         type: "transaction",
-        quantity: input.quantity ?? 1,
         item: input.item,
+        quantity: input.quantity,
         assign: input.assign ?? true,
-        iccid: input.iccid ?? "",
-      },
+        iccid: input.iccid,
+        allowReassign: input.allowReassign ?? true,
+      }),
     });
   }
 
-  getAssignments(orderReference: string) {
+  /** GET /esims/assignments — query `reference` (order / apply reference). */
+  getAssignments(reference: string) {
     return this.request("/esims/assignments", {
-      query: { orderReference },
+      query: { reference, orderReference: reference },
       accept: "application/json",
     });
   }
@@ -91,12 +123,30 @@ export class EsimGoClient {
     return this.request(`/esims/${encodeURIComponent(iccid)}/bundles/${encodeURIComponent(name)}`);
   }
 
+  /**
+   * V3 callbacks: HMAC-SHA256 of raw body, digest as base64 in X-Signature-SHA256.
+   * Also accept hex digests for older samples.
+   */
   verifyWebhookSignature(rawBody: string, signatureHeader: string | undefined) {
-    if (!signatureHeader || !env.ESIM_GO_API_KEY) return false;
-    const digest = createHmac("sha256", env.ESIM_GO_API_KEY).update(rawBody).digest("hex");
-    const a = Buffer.from(digest);
-    const b = Buffer.from(signatureHeader);
-    return a.length === b.length && timingSafeEqual(a, b);
+    if (!env.ESIM_GO_API_KEY) return true;
+    if (!signatureHeader?.trim()) return false;
+
+    const raw = Buffer.from(rawBody, "utf8");
+    const base64 = createHmac("sha256", env.ESIM_GO_API_KEY).update(raw).digest("base64");
+    const hex = createHmac("sha256", env.ESIM_GO_API_KEY).update(raw).digest("hex");
+    const incoming = signatureHeader.trim();
+
+    return safeEqual(incoming, base64) || safeEqual(incoming.toLowerCase(), hex.toLowerCase());
+  }
+}
+
+function safeEqual(a: string, b: string) {
+  try {
+    const ba = Buffer.from(a);
+    const bb = Buffer.from(b);
+    return ba.length === bb.length && timingSafeEqual(ba, bb);
+  } catch {
+    return false;
   }
 }
 

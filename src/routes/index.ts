@@ -115,6 +115,7 @@ apiRouter.get("/esims", requireAuth, asyncHandler(esimController.list));
 apiRouter.post("/esims/purchase", requireAuth, asyncHandler(esimController.purchase));
 apiRouter.get("/esims/:id", requireAuth, asyncHandler(esimController.get));
 apiRouter.get("/esims/:id/usage", requireAuth, asyncHandler(esimController.usage));
+apiRouter.post("/esims/:id/sync", requireAuth, asyncHandler(esimController.sync));
 apiRouter.patch("/esims/:id", requireAuth, asyncHandler(esimController.patch));
 apiRouter.post("/esims/:id/topup", requireAuth, asyncHandler(esimController.topup));
 

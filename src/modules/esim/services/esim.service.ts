@@ -5,6 +5,7 @@ import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { esimGoClient } from "../../../providers/esim-go/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { simIccid, simRef, useEsimGoLive } from "../../../lib/simulate.js";
+import { createInboxMessage } from "../../../lib/inbox.js";
 
 export const purchaseSchema = z.object({
   bundleName: z.string().min(1),
@@ -273,6 +274,103 @@ function pickChargeAmount(preferred: unknown, fallback: number): number {
   return fallback;
 }
 
+export type InstallDetails = {
+  iccid?: string;
+  matchingId?: string;
+  smdpAddress?: string;
+  activationCode?: string;
+  profileStatus?: string;
+};
+
+function strField(row: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const v = row[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+function installFromRow(raw: unknown): InstallDetails | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  const iccid = strField(row, ["iccid", "ICCID"]);
+  const matchingId = strField(row, ["matchingId", "matching_id", "MatchingId"]);
+  const smdpAddress = strField(row, ["smdpAddress", "smdp", "smdp_address", "SMDP"]);
+  let activationCode = strField(row, ["activationCode", "activation_code", "lpa"]);
+  if (!activationCode && matchingId && smdpAddress) {
+    const host = smdpAddress.replace(/^https?:\/\//i, "");
+    activationCode = `LPA:1$${host}$${matchingId}`;
+  } else if (!activationCode && matchingId) {
+    activationCode = matchingId;
+  }
+  if (!iccid && !activationCode) return null;
+  return {
+    iccid,
+    matchingId,
+    smdpAddress,
+    activationCode,
+    profileStatus: strField(row, ["profileStatus", "profile_status", "status"]),
+  };
+}
+
+/** Pull install details from order create response or assignments payload. */
+function extractInstallDetails(payload: unknown): InstallDetails | null {
+  if (!payload) return null;
+  if (Array.isArray(payload)) {
+    for (const row of payload) {
+      const hit = installFromRow(row);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  const root = asRecord(payload);
+  if (!root) return null;
+
+  // Direct assignment object
+  const direct = installFromRow(root);
+  if (direct?.iccid || direct?.activationCode) return direct;
+
+  // Transaction response: order[].esims[]
+  const orderRows = Array.isArray(root.order) ? root.order : [];
+  for (const line of orderRows) {
+    const lineObj = asRecord(line);
+    if (!lineObj) continue;
+    const esims = Array.isArray(lineObj.esims) ? lineObj.esims : [];
+    for (const e of esims) {
+      const hit = installFromRow(e);
+      if (hit) return hit;
+    }
+    if (Array.isArray(lineObj.iccids) && typeof lineObj.iccids[0] === "string") {
+      return { iccid: String(lineObj.iccids[0]) };
+    }
+  }
+
+  // Assignments wrappers
+  for (const key of ["esims", "apply", "assignments", "data"]) {
+    const list = root[key];
+    if (Array.isArray(list)) {
+      for (const row of list) {
+        const hit = installFromRow(row);
+        if (hit) return hit;
+      }
+    }
+  }
+
+  return null;
+}
+
+function bytesToMb(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  // eSIM Go often reports remainingQuantity in bytes
+  if (value > 100_000) return Math.round(value / (1024 * 1024));
+  return Math.round(value);
+}
+
+function qrUrlFor(activationCode: string) {
+  return `https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(activationCode)}`;
+}
+
 export class EsimService {
   /** Live catalogue is paginated; fetch pages and normalize to a stable shape. */
   private async fetchLiveCatalogue(query?: Record<string, string>): Promise<CatalogueBundle[]> {
@@ -387,8 +485,10 @@ export class EsimService {
     try {
       if (!useEsimGoLive()) {
         const iccid = simIccid();
-        const activationCode = `LPA:1$sim.fulus.local$${simRef("ACT")}`;
-        return prisma.esim.create({
+        const matchingId = simRef("ACT");
+        const smdpAddress = "smdp.fulus.local";
+        const activationCode = `LPA:1$${smdpAddress}$${matchingId}`;
+        const esim = await prisma.esim.create({
           data: {
             userId,
             provider: "simulated",
@@ -399,10 +499,12 @@ export class EsimService {
             activationCode,
             dataRemainingMb: dataMb || null,
             expiresAt: new Date(Date.now() + days * 24 * 60 * 60 * 1000),
-            qrCodeUrl: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(activationCode)}`,
+            qrCodeUrl: qrUrlFor(activationCode),
             providerPayload: asJson({
               simulated: true,
               catalogue: catalogBundle,
+              matchingId,
+              smdpAddress,
             }),
             orders: {
               create: {
@@ -417,12 +519,20 @@ export class EsimService {
           },
           include: { orders: true },
         });
+        await createInboxMessage({
+          userId,
+          title: "eSIM ready to install",
+          body: `${esim.label ?? "Your eSIM"} is ready. Open My eSIMs to scan the QR code.`,
+          category: "esim",
+        });
+        return esim;
       }
 
       const providerResult = (await esimGoClient.createOrder({
         item: input.bundleName,
         quantity: input.quantity,
         assign: true,
+        allowReassign: true,
       })) as Record<string, unknown>;
 
       const orderReference =
@@ -432,60 +542,37 @@ export class EsimService {
             ? providerResult.order_reference
             : undefined;
 
-      let iccid: string | undefined;
-      let activationCode: string | undefined;
+      let install = extractInstallDetails(providerResult);
 
-      if (orderReference) {
+      if ((!install?.iccid || !install.activationCode) && orderReference) {
         try {
-          const assignments = (await esimGoClient.getAssignments(orderReference)) as Record<string, unknown>;
-          const list = Array.isArray(assignments)
-            ? assignments
-            : Array.isArray(assignments.esims)
-              ? assignments.esims
-              : [];
-          const first = list[0] as Record<string, unknown> | undefined;
-          if (first) {
-            iccid = typeof first.iccid === "string" ? first.iccid : undefined;
-            const matchingId =
-              typeof first.matchingId === "string"
-                ? first.matchingId
-                : typeof first.matching_id === "string"
-                  ? first.matching_id
-                  : undefined;
-            const smdp =
-              typeof first.smdpAddress === "string"
-                ? first.smdpAddress
-                : typeof first.smdp === "string"
-                  ? first.smdp
-                  : undefined;
-            if (typeof first.activationCode === "string") {
-              activationCode = first.activationCode;
-            } else if (matchingId && smdp) {
-              activationCode = `LPA:1$${smdp}$${matchingId}`;
-            } else if (matchingId) {
-              activationCode = matchingId;
-            }
-          }
+          const assignments = await esimGoClient.getAssignments(orderReference);
+          install = extractInstallDetails(assignments) ?? install;
         } catch {
-          // Assignment fetch can lag — webhook / later poll can fill ICCID
+          // Assignment fetch can lag — sync endpoint / webhook can fill later
         }
       }
 
-      return prisma.esim.create({
+      const activationCode = install?.activationCode;
+      const esim = await prisma.esim.create({
         data: {
           userId,
           provider: "esim-go",
-          iccid,
-          status: iccid ? "READY" : "ORDERED",
+          iccid: install?.iccid,
+          status: install?.iccid || activationCode ? "READY" : "ORDERED",
           bundleName: input.bundleName,
           label: input.label ?? catalogBundle?.description ?? input.bundleName,
           activationCode,
           dataRemainingMb: dataMb || null,
           expiresAt: new Date(Date.now() + days * 24 * 60 * 60 * 1000),
-          qrCodeUrl: activationCode
-            ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(activationCode)}`
-            : undefined,
-          providerPayload: asJson({ order: providerResult, catalogue: catalogBundle }),
+          qrCodeUrl: activationCode ? qrUrlFor(activationCode) : undefined,
+          providerPayload: asJson({
+            order: providerResult,
+            catalogue: catalogBundle,
+            matchingId: install?.matchingId,
+            smdpAddress: install?.smdpAddress,
+            orderReference,
+          }),
           orders: {
             create: {
               transactionId: walletTx.id,
@@ -499,6 +586,18 @@ export class EsimService {
         },
         include: { orders: true },
       });
+
+      await createInboxMessage({
+        userId,
+        title: esim.status === "READY" ? "eSIM ready to install" : "eSIM order placed",
+        body:
+          esim.status === "READY"
+            ? `${esim.label ?? "Your eSIM"} is ready. Open My eSIMs to scan the QR code.`
+            : `${esim.label ?? "Your eSIM"} was ordered. Activation details will appear shortly.`,
+        category: "esim",
+      });
+
+      return esim;
     } catch (error) {
       await walletService.credit({
         userId,
@@ -510,6 +609,58 @@ export class EsimService {
       });
       throw error instanceof Error ? error : new AppError("eSIM purchase failed");
     }
+  }
+
+  /** Re-fetch SM-DP+ / ICCID from eSIM Go when assignment lagged after purchase. */
+  async sync(userId: string, id: string) {
+    const esim = await this.get(userId, id);
+    if (!useEsimGoLive()) return esim;
+
+    const payload = asRecord(esim.providerPayload) ?? {};
+    const orderRef =
+      (typeof payload.orderReference === "string" && payload.orderReference) ||
+      esim.orders.find((o) => o.orderReference)?.orderReference;
+
+    if (!orderRef && esim.iccid && esim.activationCode) return esim;
+    if (!orderRef) {
+      throw new AppError("No order reference to sync — wait a moment and try again", 409);
+    }
+
+    const assignments = await esimGoClient.getAssignments(orderRef);
+    const install = extractInstallDetails(assignments);
+    if (!install?.iccid && !install?.activationCode) {
+      return esim;
+    }
+
+    const activationCode = install.activationCode ?? esim.activationCode ?? undefined;
+    const updated = await prisma.esim.update({
+      where: { id: esim.id },
+      data: {
+        iccid: install.iccid ?? esim.iccid,
+        activationCode,
+        qrCodeUrl: activationCode ? qrUrlFor(activationCode) : esim.qrCodeUrl,
+        status: esim.status === "ORDERED" ? "READY" : esim.status,
+        providerPayload: asJson({
+          ...payload,
+          matchingId: install.matchingId ?? payload.matchingId,
+          smdpAddress: install.smdpAddress ?? payload.smdpAddress,
+          lastSyncAt: new Date().toISOString(),
+          lastAssignment: assignments,
+        }),
+      },
+      include: { orders: true },
+    });
+
+    if (esim.status === "ORDERED" && updated.status === "READY") {
+      await createInboxMessage({
+        userId,
+        title: "eSIM ready to install",
+        body: `${updated.label ?? "Your eSIM"} activation details are ready.`,
+        category: "esim",
+      });
+    }
+
+    return updated;
   }
 
   async topup(userId: string, id: string, input: z.infer<typeof topupSchema>) {
@@ -552,6 +703,7 @@ export class EsimService {
           quantity: 1,
           assign: true,
           iccid: esim.iccid,
+          allowReassign: true,
         })) as Record<string, unknown>;
         providerPayload = { ...providerPayload, order: providerResult };
       }
@@ -613,15 +765,30 @@ export class EsimService {
     if (useEsimGoLive() && esim.iccid && esim.bundleName) {
       try {
         const status = (await esimGoClient.getBundleStatus(esim.iccid, esim.bundleName)) as Record<string, unknown>;
-        const remaining = Number(status.dataRemaining ?? status.remainingMb ?? esim.dataRemainingMb ?? 0);
-        const total = Number(status.dataAmount ?? status.totalMb ?? remaining);
+        const remainingRaw = Number(
+          status.remainingQuantity ?? status.dataRemaining ?? status.remainingMb ?? esim.dataRemainingMb ?? 0,
+        );
+        const initialRaw = Number(
+          status.initialQuantity ?? status.dataAmount ?? status.totalMb ?? remainingRaw,
+        );
+        const remaining = bytesToMb(remainingRaw);
+        const total = bytesToMb(initialRaw) || remaining;
+        if (remaining >= 0 && esim.dataRemainingMb !== remaining) {
+          await prisma.esim.update({
+            where: { id: esim.id },
+            data: {
+              dataRemainingMb: remaining,
+              status: remaining === 0 && !Boolean(status.unlimited) ? "DEPLETED" : esim.status,
+            },
+          });
+        }
         return {
           iccid: esim.iccid,
           dataRemainingMb: remaining,
           dataUsedMb: Math.max(0, total - remaining),
           dataTotalMb: total,
-          expiresAt: esim.expiresAt,
-          status: esim.status,
+          expiresAt: status.endTime ?? esim.expiresAt,
+          status: remaining === 0 ? "DEPLETED" : esim.status,
           simulated: false,
           provider: status,
         };
@@ -630,8 +797,10 @@ export class EsimService {
       }
     }
 
-    const total = esim.dataRemainingMb && esim.dataRemainingMb > 0 ? esim.dataRemainingMb * 2 : 2048;
-    const remaining = esim.dataRemainingMb ?? 0;
+    const catalogue = asRecord(asRecord(esim.providerPayload)?.catalogue);
+    const catalogMb = Number(catalogue?.dataMb ?? 0);
+    const remaining = esim.dataRemainingMb ?? catalogMb ?? 0;
+    const total = catalogMb > 0 ? catalogMb : remaining > 0 ? remaining : 2048;
     return {
       iccid: esim.iccid,
       dataRemainingMb: remaining,
@@ -641,6 +810,67 @@ export class EsimService {
       status: esim.status,
       simulated: esim.provider === "simulated",
     };
+  }
+
+  /** Apply live usage / lifecycle updates from eSIM Go callbacks. */
+  async applyWebhookUpdate(payload: Record<string, unknown>) {
+    const iccid = strField(payload, ["iccid", "ICCID"]);
+    if (!iccid) return null;
+
+    const esim = await prisma.esim.findFirst({ where: { iccid } });
+    if (!esim) return null;
+
+    const alertType = String(payload.alertType ?? payload.event ?? payload.type ?? "").toLowerCase();
+    const bundle = asRecord(payload.bundle) ?? {};
+    const remainingRaw = Number(bundle.remainingQuantity ?? payload.remainingQuantity ?? NaN);
+    const initialRaw = Number(bundle.initialQuantity ?? payload.initialQuantity ?? NaN);
+    const remaining = Number.isFinite(remainingRaw) ? bytesToMb(remainingRaw) : null;
+    const endTime = strField(bundle, ["endTime", "end_time"]);
+
+    const data: Prisma.EsimUpdateInput = {
+      providerPayload: asJson({
+        ...asRecord(esim.providerPayload),
+        lastWebhook: payload,
+        lastWebhookAt: new Date().toISOString(),
+      }),
+    };
+
+    if (remaining != null) {
+      data.dataRemainingMb = remaining;
+      if (remaining === 0) data.status = "DEPLETED";
+    }
+    if (endTime) data.expiresAt = new Date(endTime);
+
+    if (alertType.includes("first") && (alertType.includes("attach") || alertType.includes("use"))) {
+      if (esim.status === "READY" || esim.status === "ORDERED") data.status = "INSTALLED";
+    }
+    if (alertType.includes("deleted") || alertType.includes("deletion")) {
+      data.status = "EXPIRED";
+    }
+
+    const updated = await prisma.esim.update({ where: { id: esim.id }, data });
+
+    if (remaining != null && (remaining === 0 || alertType.includes("utilisation") || alertType.includes("usage"))) {
+      const pct =
+        Number.isFinite(initialRaw) && initialRaw > 0
+          ? Math.round((1 - remainingRaw / initialRaw) * 100)
+          : remaining === 0
+            ? 100
+            : null;
+      await createInboxMessage({
+        userId: esim.userId,
+        title: remaining === 0 ? "eSIM data depleted" : "eSIM usage update",
+        body:
+          remaining === 0
+            ? `${esim.label ?? "Your eSIM"} has no data left. Top up to stay online.`
+            : pct != null
+              ? `${esim.label ?? "Your eSIM"} is about ${pct}% used (${remaining} MB left).`
+              : `${esim.label ?? "Your eSIM"} usage was updated (${remaining} MB left).`,
+        category: "esim",
+      });
+    }
+
+    return updated;
   }
 }
 

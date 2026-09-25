@@ -5,6 +5,12 @@ import morgan from "morgan";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler } from "./middleware/error-handler.js";
 
+declare module "express-serve-static-core" {
+  interface Request {
+    rawBody?: string;
+  }
+}
+
 export function createApp() {
   const app = express();
 
@@ -14,8 +20,16 @@ export function createApp() {
   }));
   app.use(cors({ origin: true, credentials: true }));
   app.use(morgan("dev"));
-  // Selfie / KYC payloads are base64 — allow a few MB
-  app.use(express.json({ limit: "8mb" }));
+  // Selfie / KYC payloads are base64 — allow a few MB.
+  // Capture rawBody for eSIM Go HMAC webhook verification (V3 uses raw bytes).
+  app.use(
+    express.json({
+      limit: "8mb",
+      verify: (req, _res, buf) => {
+        (req as express.Request).rawBody = buf.toString("utf8");
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
   app.use("/api/v1", apiRouter);

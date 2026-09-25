@@ -51,12 +51,29 @@ export class WebhooksService {
       throw new AppError("Invalid eSIM Go webhook signature", 401, "INVALID_SIGNATURE");
     }
 
-    const event = await this.ingest("esim-go", payload, { signature }, this.eventType(payload));
-    await prisma.webhookEvent.update({
-      where: { id: event.id },
-      data: { processed: true },
-    });
-    return event;
+    const p = asRecord(payload);
+    const eventType =
+      this.eventType(payload) ??
+      str(p.alertType) ??
+      str(p.AlertType) ??
+      (str(p.iccid) ? "esim.usage" : undefined);
+    const event = await this.ingest("esim-go", payload, { signature }, eventType);
+
+    try {
+      const { esimService } = await import("../../esim/services/esim.service.js");
+      await esimService.applyWebhookUpdate(p);
+      return prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: true, error: null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "eSIM Go webhook processing failed";
+      await prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: false, error: message },
+      });
+      throw error;
+    }
   }
 
   async handleBusha(payload: unknown) {
