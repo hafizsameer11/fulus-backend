@@ -28,6 +28,13 @@ export const patchEsimSchema = z.object({
 });
 
 /** Normalized catalogue row shared by live + simulated modes (matches eSIM Go fields). */
+export type CatalogueCountry = {
+  iso: string;
+  name: string;
+  region: string;
+  networks: Array<{ name: string; brandName?: string; speeds?: string[] }>;
+};
+
 export type CatalogueBundle = {
   name: string;
   description: string;
@@ -35,10 +42,32 @@ export type CatalogueBundle = {
   days: number;
   unlimited: boolean;
   price: number;
-  countries: Array<{ iso: string; name: string; region: string }>;
+  currency: string;
+  groups: string[];
+  speed: string[];
+  autostart: boolean;
+  countries: CatalogueCountry[];
 };
 
-const SIM_CATALOGUE: CatalogueBundle[] = [
+export type CatalogueDestination = {
+  key: string;
+  name: string;
+  short: string;
+  iso?: string;
+  emblem?: "asia" | "africa" | "global";
+  regionLabel: string;
+  from: number;
+  countries: number;
+  countryList: Array<{ iso: string; name: string }>;
+  planCount: number;
+  accent: string;
+};
+
+const SIM_CATALOGUE_RAW: Array<
+  Omit<CatalogueBundle, "currency" | "groups" | "speed" | "autostart" | "countries"> & {
+    countries: Array<{ iso: string; name: string; region: string }>;
+  }
+> = [
   {
     name: "esim_1GB_7D_NG_V2",
     description: "Nigeria 1GB 7 Days",
@@ -226,16 +255,33 @@ function extractBundleRows(payload: unknown): unknown[] {
   return [];
 }
 
-function normalizeCountry(raw: unknown): { iso: string; name: string; region: string } | null {
+function normalizeCountry(raw: unknown): CatalogueCountry | null {
   const c = asRecord(raw);
   if (!c) return null;
   const nested = asRecord(c.country);
   const iso = String(c.iso ?? nested?.iso ?? "").toUpperCase();
   if (!iso) return null;
+
+  const networksRaw = Array.isArray(c.networks) ? c.networks : [];
+  const networks = networksRaw
+    .map((n) => {
+      const row = asRecord(n);
+      if (!row) return null;
+      const name = String(row.name ?? row.brandName ?? "").trim();
+      if (!name) return null;
+      return {
+        name,
+        brandName: typeof row.brandName === "string" ? row.brandName : undefined,
+        speeds: Array.isArray(row.speeds) ? row.speeds.map(String) : undefined,
+      };
+    })
+    .filter((n): n is NonNullable<typeof n> => Boolean(n));
+
   return {
     iso,
     name: String(c.name ?? nested?.name ?? iso),
     region: String(c.region ?? nested?.region ?? ""),
+    networks,
   };
 }
 
@@ -245,17 +291,43 @@ function normalizeBundle(raw: unknown): CatalogueBundle | null {
   const name = String(b.name ?? "").trim();
   if (!name) return null;
 
-  const countriesRaw = Array.isArray(b.countries)
-    ? b.countries
-    : Array.isArray(b.countryNetworks)
-      ? b.countryNetworks
-      : [];
-  const countries = countriesRaw.map(normalizeCountry).filter((c): c is NonNullable<typeof c> => Boolean(c));
+  const byIso = new Map<string, CatalogueCountry>();
+  const pushCountry = (country: CatalogueCountry | null) => {
+    if (!country) return;
+    const existing = byIso.get(country.iso);
+    if (!existing) {
+      byIso.set(country.iso, country);
+      return;
+    }
+    const netNames = new Set(existing.networks.map((n) => n.name));
+    for (const n of country.networks) {
+      if (!netNames.has(n.name)) existing.networks.push(n);
+    }
+  };
+
+  if (Array.isArray(b.countries)) {
+    for (const row of b.countries) pushCountry(normalizeCountry(row));
+  }
+  if (Array.isArray(b.countryNetworks)) {
+    for (const row of b.countryNetworks) pushCountry(normalizeCountry(row));
+  }
+  if (Array.isArray(b.roamingEnabled)) {
+    for (const row of b.roamingEnabled) {
+      const c = normalizeCountry(row);
+      if (c && !byIso.has(c.iso)) byIso.set(c.iso, { ...c, networks: [] });
+    }
+  }
 
   const dataMb = Number(b.dataAmount ?? b.dataMb ?? 0);
   const days = Number(b.duration ?? b.days ?? 0);
   const unlimited = Boolean(b.unlimited);
   const price = Number(b.price ?? 0);
+  const groups = Array.isArray(b.groups)
+    ? b.groups.map((g) => String(g)).filter(Boolean)
+    : typeof b.group === "string"
+      ? [b.group]
+      : [];
+  const speed = Array.isArray(b.speed) ? b.speed.map(String) : [];
 
   return {
     name,
@@ -264,9 +336,169 @@ function normalizeBundle(raw: unknown): CatalogueBundle | null {
     days: Number.isFinite(days) ? days : 0,
     unlimited,
     price: Number.isFinite(price) ? price : 0,
-    countries,
+    currency: String(b.currency ?? "USD").toUpperCase(),
+    groups,
+    speed,
+    autostart: Boolean(b.autostart),
+    countries: [...byIso.values()].sort((a, b) => a.name.localeCompare(b.name)),
   };
 }
+
+const REGION_NAME_TO_KEY: Record<string, string> = {
+  europe: "eu",
+  asia: "as",
+  africa: "af",
+  global: "gl",
+  worldwide: "gl",
+  "north america": "na",
+  "middle east": "me",
+  "latin america": "latam",
+  "south america": "latam",
+  oceania: "oc",
+  caribbean: "caribbean",
+};
+
+const ISO_ACCENT: Record<string, string> = {
+  NG: "#008751",
+  SA: "#006C35",
+  US: "#0A3161",
+  GB: "#C8102E",
+  AE: "#00732F",
+  TR: "#E30A17",
+  EG: "#C8102E",
+  ZA: "#007749",
+  EU: "#003399",
+  FR: "#002395",
+  DE: "#000000",
+  JP: "#BC002D",
+  IN: "#FF9933",
+};
+
+function slugKey(input: string) {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32);
+}
+
+function destinationOf(bundle: CatalogueBundle): {
+  key: string;
+  name: string;
+  iso?: string;
+  regionLabel: string;
+  emblem?: "asia" | "africa" | "global";
+} {
+  const countries = bundle.countries;
+  if (countries.length === 1) {
+    const c = countries[0]!;
+    return {
+      key: c.iso.toLowerCase() === "gb" ? "uk" : c.iso.toLowerCase(),
+      name: c.name,
+      iso: c.iso.toLowerCase() === "gb" ? "gb" : c.iso.toLowerCase(),
+      regionLabel: c.region || c.name,
+    };
+  }
+
+  const regions = [...new Set(countries.map((c) => c.region).filter(Boolean))];
+  if (regions.length === 1) {
+    const regionLabel = regions[0]!;
+    const key = REGION_NAME_TO_KEY[regionLabel.toLowerCase()] ?? slugKey(regionLabel);
+    const emblem =
+      key === "as" || /asia/i.test(regionLabel)
+        ? "asia"
+        : key === "af" || /africa/i.test(regionLabel)
+          ? "africa"
+          : key === "gl" || /global|world/i.test(regionLabel)
+            ? "global"
+            : undefined;
+    return { key, name: regionLabel, regionLabel, emblem };
+  }
+
+  return { key: "gl", name: "Global", regionLabel: "Global", emblem: "global" };
+}
+
+/** Group platform bundles into destinations the app can browse. */
+export function destinationsFromBundles(bundles: CatalogueBundle[]): CatalogueDestination[] {
+  const map = new Map<
+    string,
+    {
+      meta: CatalogueDestination;
+      countryMap: Map<string, { iso: string; name: string }>;
+      minPrice: number;
+      planCount: number;
+    }
+  >();
+
+  for (const bundle of bundles) {
+    const dest = destinationOf(bundle);
+    const existing = map.get(dest.key);
+    const price = Number(bundle.price) || 0;
+    if (!existing) {
+      const countryMap = new Map(
+        bundle.countries.map((c) => [c.iso, { iso: c.iso, name: c.name }] as const),
+      );
+      map.set(dest.key, {
+        countryMap,
+        minPrice: price,
+        planCount: 1,
+        meta: {
+          key: dest.key,
+          name: dest.name,
+          short: dest.name.length > 10 ? dest.name.slice(0, 9) : dest.name,
+          iso: dest.iso,
+          emblem: dest.emblem,
+          regionLabel: dest.regionLabel,
+          from: price,
+          countries: countryMap.size,
+          countryList: [...countryMap.values()].sort((a, b) => a.name.localeCompare(b.name)),
+          planCount: 1,
+          accent: ISO_ACCENT[(dest.iso ?? dest.key).toUpperCase()] ?? "#0EA5E9",
+        },
+      });
+    } else {
+      for (const c of bundle.countries) {
+        existing.countryMap.set(c.iso, { iso: c.iso, name: c.name });
+      }
+      existing.minPrice =
+        existing.minPrice > 0 && price > 0
+          ? Math.min(existing.minPrice, price)
+          : existing.minPrice || price;
+      existing.planCount += 1;
+      existing.meta = {
+        ...existing.meta,
+        from: existing.minPrice,
+        countries: existing.countryMap.size,
+        countryList: [...existing.countryMap.values()].sort((a, b) => a.name.localeCompare(b.name)),
+        planCount: existing.planCount,
+      };
+    }
+  }
+
+  return [...map.values()]
+    .map((v) => v.meta)
+    .sort((a, b) => {
+      if (b.planCount !== a.planCount) return b.planCount - a.planCount;
+      return a.name.localeCompare(b.name);
+    });
+}
+
+function enrichSimBundle(
+  row: Omit<CatalogueBundle, "currency" | "groups" | "speed" | "autostart" | "countries"> & {
+    countries: Array<{ iso: string; name: string; region: string }>;
+  },
+): CatalogueBundle {
+  return {
+    ...row,
+    currency: "USD",
+    groups: ["Standard eSIM Bundles"],
+    speed: ["4G"],
+    autostart: true,
+    countries: row.countries.map((c) => ({ ...c, networks: [] })),
+  };
+}
+
+const SIM_CATALOGUE: CatalogueBundle[] = SIM_CATALOGUE_RAW.map(enrichSimBundle);
 
 function pickChargeAmount(preferred: unknown, fallback: number): number {
   const n = Number(preferred);
@@ -416,7 +648,13 @@ export class EsimService {
   async catalogue(query?: Record<string, string>) {
     if (useEsimGoLive()) {
       const bundles = await this.fetchLiveCatalogue(query);
-      return { bundles, simulated: false, count: bundles.length };
+      return {
+        bundles,
+        destinations: destinationsFromBundles(bundles),
+        provider: "esim-go",
+        simulated: false,
+        count: bundles.length,
+      };
     }
 
     const region = query?.region?.trim();
@@ -434,7 +672,13 @@ export class EsimService {
       rows = rows.filter((b) => b.countries.some((c) => countries.includes(c.iso)));
     }
 
-    return { bundles: rows, simulated: true, count: rows.length };
+    return {
+      bundles: rows,
+      destinations: destinationsFromBundles(rows),
+      provider: "simulated",
+      simulated: true,
+      count: rows.length,
+    };
   }
 
   async list(userId: string) {
