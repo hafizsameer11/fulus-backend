@@ -1,6 +1,6 @@
 import { bushaClient } from "../../providers/busha/client.js";
 import { useBushaLive, simRef } from "../../lib/simulate.js";
-import { AppError } from "../../lib/errors.js";
+import { AppError, sanitizePublicCopy } from "../../lib/errors.js";
 
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
@@ -54,12 +54,7 @@ export type MasterPayoutResult = {
 /** Never surface vendor brand names in bank details shown to users. */
 function scrubVendorBrand(value: string | undefined): string | undefined {
   if (!value) return value;
-  const cleaned = value
-    .replace(/\bbusha\b/gi, "")
-    .replace(/\s{2,}/g, " ")
-    .replace(/^[\s/·\-–—]+|[\s/·\-–—]+$/g, "")
-    .trim();
-  return cleaned || undefined;
+  return sanitizePublicCopy(value) || undefined;
 }
 
 function extractBank(transfer: Record<string, unknown>): TempBankDetails {

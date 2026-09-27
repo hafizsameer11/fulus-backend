@@ -1,7 +1,16 @@
 import { Prisma, type TransactionType, type WalletCurrency } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+
+function scrubDescription(description?: string | null) {
+  return sanitizePublicCopy(description) || undefined;
+}
+
+function scrubTx<T extends { description?: string | null }>(row: T): T {
+  if (!row?.description) return row;
+  return { ...row, description: scrubDescription(row.description) ?? null };
+}
 
 export class WalletService {
   async listWallets(userId: string) {
@@ -20,11 +29,12 @@ export class WalletService {
   }
 
   async listTransactions(userId: string, take = 50) {
-    return prisma.transaction.findMany({
+    const rows = await prisma.transaction.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
       take,
     });
+    return rows.map(scrubTx);
   }
 
   async getTransaction(userId: string, id: string) {
@@ -33,7 +43,7 @@ export class WalletService {
       include: { swap: true, deposit: true, bankTransfer: true, billPayment: true },
     });
     if (!tx) throw new NotFoundError("Transaction not found");
-    return tx;
+    return scrubTx(tx);
   }
 
   async credit(params: {
@@ -48,6 +58,7 @@ export class WalletService {
   }) {
     const amount = new Prisma.Decimal(params.amount);
     if (amount.lte(0)) throw new AppError("Amount must be positive");
+    const description = scrubDescription(params.description);
 
     return prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findUnique({
@@ -66,7 +77,7 @@ export class WalletService {
           reference: makeReference("TX"),
           provider: params.provider,
           providerRef: params.providerRef,
-          description: params.description,
+          description,
           metadata: params.metadata,
         },
       });
@@ -83,7 +94,7 @@ export class WalletService {
           type: "CREDIT",
           amount,
           balanceAfter,
-          description: params.description,
+          description,
         },
       });
 
@@ -103,6 +114,7 @@ export class WalletService {
   }) {
     const amount = new Prisma.Decimal(params.amount);
     if (amount.lte(0)) throw new AppError("Amount must be positive");
+    const description = scrubDescription(params.description);
 
     return prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findUnique({
@@ -124,7 +136,7 @@ export class WalletService {
           reference: makeReference("TX"),
           provider: params.provider,
           providerRef: params.providerRef,
-          description: params.description,
+          description,
           metadata: params.metadata,
         },
       });
@@ -141,7 +153,7 @@ export class WalletService {
           type: "DEBIT",
           amount,
           balanceAfter,
-          description: params.description,
+          description,
         },
       });
 

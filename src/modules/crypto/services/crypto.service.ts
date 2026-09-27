@@ -142,7 +142,7 @@ async function requireNinKyc(userId: string) {
   if (!nin || nin.status !== "PASSED") {
     if (nin?.status === "PENDING") {
       throw new AppError(
-        "Your NIN verification is under review. Crypto unlocks after Prembly approves.",
+        "Your NIN verification is under review. Crypto unlocks after identity verification is approved.",
         403,
         "KYC_UNDER_REVIEW",
       );
@@ -186,7 +186,7 @@ function extractTempBank(transfer: Record<string, unknown>) {
   const scrub = (v: string | null | undefined) => {
     if (!v) return null;
     const cleaned = v
-      .replace(/\bbusha\b/gi, "")
+      .replace(/\b(busha|payaza|flutterwave|prembly|pagocards|strowallet)\b/gi, "")
       .replace(/\s{2,}/g, " ")
       .replace(/^[\s/·\-–—]+|[\s/·\-–—]+$/g, "")
       .trim();

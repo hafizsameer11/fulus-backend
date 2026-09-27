@@ -646,7 +646,7 @@ document.getElementById('pay').onclick=function(){
       currency: "NGN",
       amount: creditAmount,
       type: "DEPOSIT",
-      description: `Bank deposit · ${opts.transferId}`,
+      description: "Bank deposit",
       provider: deposit.provider ?? "busha",
       providerRef: opts.transferId,
       metadata: asJson({

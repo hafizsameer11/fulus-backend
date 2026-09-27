@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { pagocardsClient } from "../../../providers/pagocards/client.js";
 import { PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
@@ -631,7 +631,9 @@ export class CardsService {
         reference: makeReference("TX"),
         provider: live ? "pagocards" : "simulated",
         providerRef,
-        description: `Withdraw $${amount} from Visa ••${card.last4 ?? "••••"} → NGN (awaiting confirmation)`,
+        description: sanitizePublicCopy(
+          `Withdraw $${amount} from Visa ••${card.last4 ?? "••••"} → NGN (awaiting confirmation)`,
+        ),
         metadata: asJson({
           kind: "card_withdraw",
           cardId: card.id,

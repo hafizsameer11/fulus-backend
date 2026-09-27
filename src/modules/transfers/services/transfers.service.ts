@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { useBushaLive } from "../../../lib/simulate.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
@@ -139,7 +139,7 @@ export class TransfersService {
           amount,
           currency: input.currency,
           reference,
-          description: input.narration ?? `Transfer to ${recipient.email}`,
+          description: sanitizePublicCopy(input.narration ?? `Transfer to ${recipient.email}`) || undefined,
           idempotencyKey: input.idempotencyKey,
           metadata: { direction: "out", counterpartyId: recipient.id },
         },
@@ -152,7 +152,7 @@ export class TransfersService {
           amount,
           currency: input.currency,
           reference: makeReference("P2P"),
-          description: `Transfer from ${userId}`,
+          description: "Transfer received",
           metadata: { direction: "in", counterpartyId: userId, pairReference: reference },
         },
       });
@@ -233,7 +233,8 @@ export class TransfersService {
           fee,
           currency: "NGN",
           reference: makeReference("BNK"),
-          description: input.narration ?? `Bank transfer to ${input.accountNumber}`,
+          description:
+            sanitizePublicCopy(input.narration ?? `Bank transfer to ${input.accountNumber}`) || undefined,
           idempotencyKey: input.idempotencyKey,
           provider: live ? "busha" : "mock",
           metadata: {

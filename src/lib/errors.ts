@@ -30,15 +30,48 @@ export class ConflictError extends AppError {
   }
 }
 
-const PROVIDER_NAMES = ["strowallet", "busha", "prembly", "pagocards", "esim-go", "esim go", "pago"];
+const PROVIDER_NAMES = [
+  "strowallet",
+  "busha",
+  "prembly",
+  "pagocards",
+  "pago cards",
+  "pago",
+  "flutterwave",
+  "esim-go",
+  "esim go",
+  "esimgo",
+  "payaza",
+];
+
+/** Strip vendor brands from any copy that may reach the app UI (errors, tx descriptions). */
+export function sanitizePublicCopy(message: string | null | undefined, fallback = ""): string {
+  let msg = String(message ?? "").trim();
+  if (!msg) return fallback;
+
+  msg = msg.replace(
+    /^(strowallet|busha|prembly|pagocards|pago|flutterwave|esim-go|esim go|payaza)\s*:\s*/i,
+    "",
+  ).trim();
+
+  for (const name of PROVIDER_NAMES) {
+    msg = msg.replace(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"), "");
+  }
+  msg = msg
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*([·|/])\s*/g, " $1 ")
+    .replace(/^[:\-–—·|/]+\s*/, "")
+    .replace(/\s*[:\-–—·|/]+$/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  return msg || fallback;
+}
 
 /** Strip vendor brands from copy that may reach the app UI. */
 export function toUserFacingErrorMessage(message: string, fallback = "Something went wrong. Please try again."): string {
   let msg = String(message ?? "").trim();
   if (!msg) return fallback;
-
-  // "strowallet: …"
-  msg = msg.replace(/^(strowallet|busha|prembly|pagocards|esim-go|esim go)\s*:\s*/i, "").trim();
 
   if (/^(strowallet\s+)?request failed$/i.test(msg)) {
     return "Payment could not be completed. Please try again.";
@@ -53,12 +86,7 @@ export function toUserFacingErrorMessage(message: string, fallback = "Something 
     return "This service is temporarily unavailable. Please try again later.";
   }
 
-  for (const name of PROVIDER_NAMES) {
-    msg = msg.replace(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"), "");
-  }
-  msg = msg.replace(/\s{2,}/g, " ").replace(/^[:\-–—]+\s*/, "").trim();
-
-  return msg || fallback;
+  return sanitizePublicCopy(msg, fallback);
 }
 
 /**

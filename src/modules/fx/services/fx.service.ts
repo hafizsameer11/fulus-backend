@@ -1,7 +1,7 @@
 import { Prisma, type WalletCurrency } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 
 const FIAT = ["NGN", "USD", "SAR"] as const;
@@ -154,7 +154,7 @@ export class FxService {
           amount: fromAmount,
           currency: input.fromCurrency,
           reference,
-          description: `Swap ${input.fromCurrency} → ${input.toCurrency}`,
+          description: sanitizePublicCopy(`Swap ${input.fromCurrency} → ${input.toCurrency}`),
           idempotencyKey: input.idempotencyKey,
           metadata: {
             toCurrency: input.toCurrency,
