@@ -1092,6 +1092,7 @@ export class EsimService {
           expiresAt: status.endTime ?? esim.expiresAt,
           status: remaining === 0 ? "DEPLETED" : esim.status,
           simulated: false,
+          history: [],
           provider: status,
         };
       } catch {
@@ -1101,16 +1102,17 @@ export class EsimService {
 
     const catalogue = asRecord(asRecord(esim.providerPayload)?.catalogue);
     const catalogMb = Number(catalogue?.dataMb ?? 0);
-    const remaining = esim.dataRemainingMb ?? catalogMb ?? 0;
-    const total = catalogMb > 0 ? catalogMb : remaining > 0 ? remaining : 2048;
+    const remaining = Number(esim.dataRemainingMb ?? catalogMb ?? 0);
+    const total = catalogMb > 0 ? catalogMb : remaining;
     return {
       iccid: esim.iccid,
       dataRemainingMb: remaining,
-      dataUsedMb: Math.max(0, total - remaining),
+      dataUsedMb: total > 0 ? Math.max(0, total - remaining) : 0,
       dataTotalMb: total,
       expiresAt: esim.expiresAt,
       status: esim.status,
-      simulated: esim.provider === "simulated",
+      simulated: esim.provider === "simulated" || !useEsimGoLive(),
+      history: [],
     };
   }
 
