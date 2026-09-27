@@ -327,6 +327,7 @@ model Deposit {
 
   @@index([userId, createdAt])
   @@index([status])
+  @@index([provider, providerRef])
 }
 
 model VirtualAccount {

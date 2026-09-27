@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { created, ok } from "../../../lib/http.js";
 import { UnauthorizedError } from "../../../lib/errors.js";
 import {
+  bushaNgnDepositSchema,
   createDepositSchema,
   depositsService,
   initiateCardDepositSchema,
@@ -13,6 +14,18 @@ export class DepositsController {
     if (!req.user) throw new UnauthorizedError();
     const input = createDepositSchema.parse(req.body ?? {});
     return created(res, await depositsService.createBankDeposit(req.user.id, input));
+  };
+
+  initiateBushaNgn = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    const input = bushaNgnDepositSchema.parse(req.body ?? {});
+    return created(res, await depositsService.initiateBushaNgnDeposit(req.user.id, input));
+  };
+
+  confirmBushaNgn = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    const body = z.object({ depositId: z.string().min(1) }).parse(req.body ?? {});
+    return ok(res, await depositsService.confirmBushaNgnDeposit(req.user.id, body.depositId));
   };
 
   initiateCard = async (req: Request, res: Response) => {

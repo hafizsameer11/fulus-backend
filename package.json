@@ -14,7 +14,8 @@
     "prisma:studio": "prisma studio",
     "lint": "tsc -p tsconfig.json --noEmit",
     "docker:up": "docker compose up -d --build",
-    "docker:down": "docker compose down"
+    "docker:down": "docker compose down",
+    "busha:float-proof": "tsx scripts/busha-float-proof.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

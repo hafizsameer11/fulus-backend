@@ -8,14 +8,19 @@ import { createInboxMessage } from "../../../lib/inbox.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { fxService } from "../../fx/services/fx.service.js";
 import { flutterwaveClient, flutterwaveLive } from "../../../providers/flutterwave/client.js";
+import { bushaFloatService } from "../../../providers/busha/float.js";
+import { useBushaLive } from "../../../lib/simulate.js";
 
 /** Card processing fee shown in the deposit UI (1.5%). */
 export const CARD_FEE_BPS = 150;
 
 export const createDepositSchema = z.object({
   currency: z.enum(["NGN"]).default("NGN"),
-  /** Required — no live bank yet, so we settle a mock credit immediately. */
   amount: z.number().positive().max(5_000_000),
+});
+
+export const bushaNgnDepositSchema = z.object({
+  amount: z.number().positive().min(100).max(5_000_000),
 });
 
 export const initiateCardDepositSchema = z.object({
@@ -562,6 +567,140 @@ document.getElementById('pay').onclick=function(){
     return { ...settled, status: "SUCCESS" as const };
   }
 
+  /**
+   * PalmPay-style NGN funding: Busha temp bank credits **business master** float;
+   * Fulus credits the user ledger when the transfer webhook confirms (net of fees).
+   */
+  async initiateBushaNgnDeposit(userId: string, input: z.infer<typeof bushaNgnDepositSchema>) {
+    const master = await bushaFloatService.createMasterNgnDeposit(input.amount);
+    const deposit = await prisma.deposit.create({
+      data: {
+        userId,
+        method: "VIRTUAL_ACCOUNT",
+        currency: "NGN",
+        amount: master.targetAmount,
+        status: "PENDING",
+        provider: master.simulated ? "busha-sim" : "busha",
+        providerRef: master.transferId,
+        instructions: {
+          bankName: master.bank.bankName,
+          bankCode: master.bank.bankCode,
+          accountName: master.bank.accountName,
+          accountNumber: master.bank.accountNumber,
+          expiresAt: master.bank.expiresAt,
+          sourceAmount: master.sourceAmount,
+          targetAmount: master.targetAmount,
+          feeAmount: master.feeAmount,
+          transferId: master.transferId,
+          quoteId: master.quoteId,
+          masterFloat: true,
+        },
+        metadata: asJson({
+          kind: "busha_master_ngn_deposit",
+          sourceAmount: master.sourceAmount,
+          targetAmount: master.targetAmount,
+          feeAmount: master.feeAmount,
+          raw: master.raw,
+        }),
+      },
+    });
+
+    return {
+      deposit,
+      bankAccount: {
+        ...master.bank,
+        amount: master.sourceAmount,
+        creditAmount: master.targetAmount,
+        feeAmount: master.feeAmount,
+        currency: "NGN",
+        transferId: master.transferId,
+      },
+      simulated: master.simulated,
+      live: useBushaLive(),
+    };
+  }
+
+  /** Credit Fulus NGN from a confirmed Busha master deposit (idempotent). */
+  async settleBushaMasterDeposit(opts: {
+    transferId: string;
+    creditedAmount?: number;
+    webhook?: Record<string, unknown>;
+  }) {
+    const deposit = await prisma.deposit.findFirst({
+      where: {
+        providerRef: opts.transferId,
+        provider: { in: ["busha", "busha-sim"] },
+      },
+    });
+    if (!deposit) return null;
+    if (deposit.status === "SUCCESS") return { deposit, alreadySettled: true };
+
+    const meta = asRecord(deposit.metadata);
+    const creditAmount =
+      opts.creditedAmount ??
+      Number(meta.targetAmount ?? deposit.amount ?? 0);
+    if (!(creditAmount > 0)) throw new AppError("Invalid busha deposit credit amount");
+
+    const transaction = await walletService.credit({
+      userId: deposit.userId,
+      currency: "NGN",
+      amount: creditAmount,
+      type: "DEPOSIT",
+      description: `Busha bank deposit · ${opts.transferId}`,
+      provider: deposit.provider ?? "busha",
+      providerRef: opts.transferId,
+      metadata: asJson({
+        kind: "busha_master_ngn_deposit",
+        webhook: opts.webhook ?? null,
+        sourceAmount: meta.sourceAmount,
+        feeAmount: meta.feeAmount,
+      }),
+    });
+
+    const updated = await prisma.deposit.update({
+      where: { id: deposit.id },
+      data: {
+        status: "SUCCESS",
+        amount: creditAmount,
+        transactionId: transaction.id,
+        confirmedAt: new Date(),
+        metadata: asJson({
+          ...meta,
+          settledAt: new Date().toISOString(),
+          webhook: opts.webhook ?? null,
+        }),
+      },
+    });
+
+    await createInboxMessage({
+      userId: deposit.userId,
+      category: "wallet",
+      title: "Deposit confirmed",
+      body: `₦${creditAmount.toLocaleString()} was added to your NGN wallet.`,
+    });
+
+    return { deposit: updated, transaction, alreadySettled: false };
+  }
+
+  /** Dev/sim: mark a pending Busha master deposit paid without a real bank transfer. */
+  async confirmBushaNgnDeposit(userId: string, depositId: string) {
+    const deposit = await prisma.deposit.findFirst({
+      where: { id: depositId, userId, provider: { in: ["busha", "busha-sim"] } },
+    });
+    if (!deposit) throw new NotFoundError("Deposit not found");
+    if (deposit.status === "SUCCESS") {
+      return { deposit, alreadySettled: true };
+    }
+    if (useBushaLive() && deposit.provider === "busha") {
+      throw new AppError("Live Busha deposits settle via webhook only", 400, "LIVE_WEBHOOK_ONLY");
+    }
+    return this.settleBushaMasterDeposit({
+      transferId: deposit.providerRef!,
+      creditedAmount: Number(deposit.amount ?? 0),
+      webhook: { simulated: true, confirmedByUser: true },
+    });
+  }
+
   async list(userId: string) {
     return prisma.deposit.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
   }
@@ -573,6 +712,14 @@ document.getElementById('pay').onclick=function(){
     const deposit = await prisma.deposit.findUnique({ where: { id: depositId } });
     if (!deposit) throw new AppError("Deposit not found", 404, "NOT_FOUND");
     if (deposit.status !== "PENDING") throw new AppError("Deposit already settled");
+
+    if (deposit.provider === "busha" || deposit.provider === "busha-sim") {
+      return this.settleBushaMasterDeposit({
+        transferId: String(deposit.providerRef),
+        creditedAmount: amount ?? Number(deposit.amount ?? 0),
+        webhook: { adminConfirm: true },
+      });
+    }
 
     const creditAmount = Number(amount ?? deposit.amount ?? 0);
     if (!(creditAmount > 0)) throw new AppError("Amount required to confirm deposit");

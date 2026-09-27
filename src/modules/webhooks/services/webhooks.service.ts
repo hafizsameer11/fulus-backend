@@ -137,9 +137,20 @@ export class WebhooksService {
   private async handleBushaDeposit(data: Record<string, unknown>) {
     const reference = str(data.reference) ?? str(data.id);
     const profileId = str(data.profile_id);
-    const amount = num(data.amount) ?? 0;
-    const currency = str(data.currency)?.toUpperCase();
+    const amount = num(data.amount) ?? num(data.target_amount) ?? 0;
+    const currency = str(data.currency)?.toUpperCase() ?? str(data.target_currency)?.toUpperCase();
     if (!reference || !amount || amount <= 0 || !currency) return;
+
+    // Master-float NGN deposits are matched by our pending Deposit.providerRef (TRF_…).
+    if (currency === "NGN") {
+      const { depositsService } = await import("../../deposits/services/deposits.service.js");
+      const settled = await depositsService.settleBushaMasterDeposit({
+        transferId: reference,
+        creditedAmount: amount,
+        webhook: data,
+      });
+      if (settled) return;
+    }
 
     const existing = await prisma.deposit.findFirst({
       where: { provider: "busha", providerRef: reference },
@@ -221,6 +232,81 @@ export class WebhooksService {
   private async handleBushaTransfer(eventType: string, data: Record<string, unknown>) {
     const providerRef = str(data.id) ?? str(data.reference);
     if (!providerRef) return;
+
+    // Master NGN deposits (NGN→NGN) settle on funds_received / completed without a CryptoOrder.
+    if (
+      eventType === "transfer.funds_received" ||
+      eventType === "transfer.completed" ||
+      eventType === "transfer.funds_converted" ||
+      eventType === "transfer.funds_delivered"
+    ) {
+      const source = (str(data.source_currency) ?? "").toUpperCase();
+      const target = (str(data.target_currency) ?? "").toUpperCase();
+      if (source === "NGN" && target === "NGN") {
+        const credited =
+          num(data.target_amount) ?? num(data.amount) ?? num(data.source_amount);
+        const { depositsService } = await import("../../deposits/services/deposits.service.js");
+        const settled = await depositsService.settleBushaMasterDeposit({
+          transferId: providerRef,
+          creditedAmount: credited,
+          webhook: data,
+        });
+        if (settled) return;
+      }
+    }
+
+    // Bank withdrawals initiated from Fulus (master payout).
+    if (
+      eventType === "transfer.funds_delivered" ||
+      eventType === "transfer.completed" ||
+      eventType === "transfer.failed" ||
+      eventType === "transfer.cancelled"
+    ) {
+      const bankTx = await prisma.bankTransfer.findFirst({
+        where: { providerRef },
+      });
+      if (bankTx) {
+        const ok =
+          eventType === "transfer.completed" || eventType === "transfer.funds_delivered";
+        const failed = eventType === "transfer.failed" || eventType === "transfer.cancelled";
+        if (ok && bankTx.status !== "SUCCESS") {
+          await prisma.bankTransfer.update({
+            where: { id: bankTx.id },
+            data: { status: "SUCCESS" },
+          });
+          if (bankTx.transactionId) {
+            await prisma.transaction.update({
+              where: { id: bankTx.transactionId },
+              data: { status: "SUCCESS" },
+            });
+          }
+        } else if (failed && bankTx.status !== "FAILED") {
+          await prisma.bankTransfer.update({
+            where: { id: bankTx.id },
+            data: { status: "FAILED" },
+          });
+          if (bankTx.transactionId) {
+            const tx = await prisma.transaction.findUnique({ where: { id: bankTx.transactionId } });
+            if (tx && tx.status !== "FAILED") {
+              await prisma.transaction.update({
+                where: { id: tx.id },
+                data: { status: "FAILED" },
+              });
+              await walletService.credit({
+                userId: bankTx.userId,
+                currency: "NGN",
+                amount: Number(bankTx.amount),
+                type: "ADJUSTMENT",
+                description: `Refund failed bank withdrawal ${tx.reference}`,
+                provider: "busha",
+                providerRef: `${providerRef}_refund`,
+              });
+            }
+          }
+        }
+        return;
+      }
+    }
 
     const order = await prisma.cryptoOrder.findFirst({
       where: { providerRef },
@@ -361,16 +447,48 @@ export class WebhooksService {
 
     if (status === "FAILED" && order.transactionId) {
       const payload = asRecord(order.providerPayload);
-      // Bank-funded buys never debited the wallet — nothing to refund.
-      if (payload.walletDebited === false || payload.payInType === "temporary_bank_account") {
+      const debitTx = await prisma.transaction.findUnique({ where: { id: order.transactionId } });
+      if (debitTx) {
         await prisma.transaction.update({
-          where: { id: order.transactionId },
+          where: { id: debitTx.id },
           data: { status: "FAILED" },
         });
+      }
+      // Wallet-funded buys (master float) refund NGN on failure.
+      if (payload.walletDebited === true && debitTx && debitTx.status !== "REVERSED") {
+        const alreadyRefund = await prisma.transaction.findFirst({
+          where: {
+            userId: order.userId,
+            providerRef: `${providerRef}_refund`,
+            type: "ADJUSTMENT",
+          },
+        });
+        if (!alreadyRefund) {
+          await walletService.credit({
+            userId: order.userId,
+            currency: "NGN",
+            amount: Number(debitTx.amount),
+            type: "ADJUSTMENT",
+            description: `Refund failed crypto buy ${debitTx.reference}`,
+            provider: "busha",
+            providerRef: `${providerRef}_refund`,
+          });
+        }
+        if (typeof payload.masterRecipientId === "string") {
+          try {
+            const { bushaFloatService } = await import("../../../providers/busha/float.js");
+            await bushaFloatService.deleteMasterRecipient(payload.masterRecipientId);
+          } catch {
+            // ignore
+          }
+        }
         return;
       }
-      const debitTx = await prisma.transaction.findUnique({ where: { id: order.transactionId } });
-      if (debitTx && debitTx.status !== "REVERSED" && debitTx.status !== "FAILED") {
+      // Legacy bank-paid buys never debited Fulus — nothing to refund.
+      if (payload.walletDebited === false || payload.payInType === "temporary_bank_account") {
+        return;
+      }
+      if (debitTx && debitTx.status !== "REVERSED") {
         await walletService.credit({
           userId: order.userId,
           currency: debitTx.currency,

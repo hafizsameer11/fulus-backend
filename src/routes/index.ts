@@ -14,7 +14,9 @@ import { webhooksController } from "../modules/webhooks/controllers/webhooks.con
 import { fxController } from "../modules/fx/controllers/fx.controller.js";
 import { depositsController } from "../modules/deposits/controllers/deposits.controller.js";
 import { transfersController } from "../modules/transfers/controllers/transfers.controller.js";
+import { floatJobsService } from "../modules/float/services/float-jobs.service.js";
 import { simulateProviders } from "../lib/simulate.js";
+import { ok } from "../lib/http.js";
 
 export const apiRouter = Router();
 
@@ -59,11 +61,28 @@ apiRouter.put("/admin/fx/rates", requireAdmin, asyncHandler(fxController.adminUp
 
 apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));
+apiRouter.post("/deposits/busha/ngn", requireAuth, asyncHandler(depositsController.initiateBushaNgn));
+apiRouter.post("/deposits/busha/ngn/confirm", requireAuth, asyncHandler(depositsController.confirmBushaNgn));
 apiRouter.post("/deposits/card/initiate", requireAuth, asyncHandler(depositsController.initiateCard));
 apiRouter.get("/deposits/card/verify", requireAuth, asyncHandler(depositsController.verifyCard));
 apiRouter.get("/deposits/card/inline-checkout", asyncHandler(depositsController.inlineCheckout));
 apiRouter.get("/deposits/card/return", asyncHandler(depositsController.cardReturn));
 apiRouter.post("/admin/deposits/:id/confirm", requireAdmin, asyncHandler(depositsController.confirm));
+apiRouter.get(
+  "/admin/float/recon",
+  requireAdmin,
+  asyncHandler(async (_req, res) => ok(res, await floatJobsService.reconcile())),
+);
+apiRouter.post(
+  "/admin/float/sweep",
+  requireAdmin,
+  asyncHandler(async (_req, res) => ok(res, await floatJobsService.sweepCustomerBalances())),
+);
+apiRouter.post(
+  "/admin/float/run",
+  requireAdmin,
+  asyncHandler(async (_req, res) => ok(res, await floatJobsService.runDailyJobs())),
+);
 
 apiRouter.get("/banks", requireAuth, asyncHandler(transfersController.banks));
 apiRouter.get("/users/lookup", requireAuth, asyncHandler(transfersController.lookup));

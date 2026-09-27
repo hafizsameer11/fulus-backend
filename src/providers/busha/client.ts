@@ -2,12 +2,20 @@ import { env } from "../../config/env.js";
 import { ProviderError } from "../../lib/errors.js";
 import { providerFetch } from "../../lib/provider-http.js";
 
+export type BushaProfileScope = string | null | undefined;
+/**
+ * profileId:
+ * - `undefined` → use env BUSHA_PROFILE_ID when set (legacy default)
+ * - `null` → force business/master (omit X-BU-PROFILE-ID)
+ * - `string` → that customer / business profile id
+ */
+
 /**
  * Busha Business API — customers, currencies, balances, quotes, payments, transfers.
  * Docs: https://docs.busha.io/
  */
 export class BushaClient {
-  private authHeaders(usePublic = false): Record<string, string> {
+  private authHeaders(usePublic = false, profileId?: BushaProfileScope): Record<string, string> {
     if (usePublic) {
       return { "X-BU-PUBLIC-KEY": env.BUSHA_PUBLIC_KEY };
     }
@@ -15,9 +23,15 @@ export class BushaClient {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${env.BUSHA_SECRET_KEY}`,
     };
-    if (env.BUSHA_PROFILE_ID) {
+
+    if (profileId === null) {
+      // Master / business float — do not attach a customer profile.
+    } else if (typeof profileId === "string" && profileId.trim()) {
+      headers["X-BU-PROFILE-ID"] = profileId.trim();
+    } else if (env.BUSHA_PROFILE_ID) {
       headers["X-BU-PROFILE-ID"] = env.BUSHA_PROFILE_ID;
     }
+
     return headers;
   }
 
@@ -28,7 +42,8 @@ export class BushaClient {
       body?: unknown;
       query?: Record<string, string | number | boolean | undefined | null>;
       usePublic?: boolean;
-      profileId?: string;
+      /** undefined = env default; null = master; string = that profile */
+      profileId?: BushaProfileScope;
     } = {},
   ) {
     const key = options.usePublic ? env.BUSHA_PUBLIC_KEY : env.BUSHA_SECRET_KEY;
@@ -36,10 +51,7 @@ export class BushaClient {
       throw new ProviderError("busha", "API key is not configured");
     }
 
-    const headers = this.authHeaders(options.usePublic);
-    if (options.profileId) {
-      headers["X-BU-PROFILE-ID"] = options.profileId;
-    }
+    const headers = this.authHeaders(options.usePublic, options.profileId);
 
     const { status, data } = await providerFetch<T>(env.BUSHA_BASE_URL, {
       method: options.method ?? "GET",
@@ -56,45 +68,56 @@ export class BushaClient {
     return data;
   }
 
-  listBalances(customerId?: string) {
+  /** Business (master) balances — never attach customer profile. */
+  listMasterBalances() {
+    return this.request("/v1/balances", { profileId: null });
+  }
+
+  listBalances(customerId?: string | null) {
     return this.request("/v1/balances", {
-      profileId: customerId,
+      profileId: customerId === undefined ? undefined : customerId,
     });
   }
 
   listCurrencies(query?: { type?: string }) {
     return this.request("/v1/currencies", {
       query: query?.type ? { type: query.type } : undefined,
+      profileId: null,
     });
   }
 
   createCustomer(body: Record<string, unknown>) {
-    return this.request("/v1/customers", { method: "POST", body });
+    return this.request("/v1/customers", { method: "POST", body, profileId: null });
   }
 
   updateCustomer(customerId: string, body: Record<string, unknown>) {
-    return this.request(`/v1/customers/${customerId}`, { method: "PUT", body });
+    return this.request(`/v1/customers/${customerId}`, { method: "PUT", body, profileId: null });
   }
 
   getCustomer(customerId: string) {
-    return this.request(`/v1/customers/${customerId}`);
+    return this.request(`/v1/customers/${customerId}`, { profileId: null });
   }
 
   verifyCustomer(customerId: string) {
-    return this.request(`/v1/customers/${customerId}/verify`, { method: "POST", body: {} });
+    return this.request(`/v1/customers/${customerId}/verify`, { method: "POST", body: {}, profileId: null });
   }
 
   createPayment(body: Record<string, unknown>, customerId?: string) {
-    return this.request("/v1/payments", { method: "POST", body, usePublic: true, profileId: customerId });
+    return this.request("/v1/payments", {
+      method: "POST",
+      body,
+      usePublic: true,
+      profileId: customerId ?? null,
+    });
   }
 
   getRates(query?: Record<string, string>) {
-    return this.request("/v1/rates", { query });
+    return this.request("/v1/rates", { query, profileId: null });
   }
 
-  /** GET /v1/pairs — buy/sell prices (e.g. BTCNGN). */
   listPairs(query?: { id?: string; type?: string; currency?: string; counter?: string; base?: string }) {
     return this.request("/v1/pairs", {
+      profileId: null,
       query: {
         id: query?.id,
         type: query?.type,
@@ -105,24 +128,45 @@ export class BushaClient {
     });
   }
 
-  createQuote(body: Record<string, unknown>, customerId?: string) {
-    return this.request("/v1/quotes", { method: "POST", body, profileId: customerId });
+  createQuote(body: Record<string, unknown>, profileId?: BushaProfileScope) {
+    return this.request("/v1/quotes", { method: "POST", body, profileId });
   }
 
-  createTransfer(body: Record<string, unknown>, customerId?: string) {
-    return this.request("/v1/transfers", { method: "POST", body, profileId: customerId });
+  createTransfer(body: Record<string, unknown>, profileId?: BushaProfileScope) {
+    return this.request("/v1/transfers", { method: "POST", body, profileId });
   }
 
-  getTransfer(transferId: string, customerId?: string) {
-    return this.request(`/v1/transfers/${encodeURIComponent(transferId)}`, { profileId: customerId });
+  getTransfer(transferId: string, profileId?: BushaProfileScope) {
+    return this.request(`/v1/transfers/${encodeURIComponent(transferId)}`, { profileId });
   }
 
-  /** GET /v1/addresses/{code} — persistent deposit address for a currency. */
   getDepositAddress(code: string, customerId?: string, network?: string) {
     return this.request(`/v1/addresses/${encodeURIComponent(code)}`, {
       profileId: customerId,
       query: network ? { network } : undefined,
     });
+  }
+
+  createRecipient(body: Record<string, unknown>, profileId?: BushaProfileScope) {
+    return this.request("/v1/recipients", { method: "POST", body, profileId: profileId ?? null });
+  }
+
+  listRecipients(query?: { currency?: string }, profileId?: BushaProfileScope) {
+    return this.request("/v1/recipients", {
+      profileId: profileId ?? null,
+      query: query?.currency ? { currency: query.currency } : undefined,
+    });
+  }
+
+  deleteRecipient(recipientId: string, profileId?: BushaProfileScope) {
+    return this.request(`/v1/recipients/${encodeURIComponent(recipientId)}`, {
+      method: "DELETE",
+      profileId: profileId ?? null,
+    });
+  }
+
+  getVirtualBankAccount(code: string) {
+    return this.request(`/v1/virtual_bank_accounts/${encodeURIComponent(code)}`, { profileId: null });
   }
 }
 

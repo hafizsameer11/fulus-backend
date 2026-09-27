@@ -643,7 +643,7 @@ export class CryptoService {
     const live = useBushaLive();
     const customer = live ? await requireBushaCustomer(userId) : null;
 
-    // BUY: always fund via Busha temporary bank account (no PalmPay / wallet debit).
+    // BUY: debit Fulus NGN ledger; fund Busha buy rail from master float.
     if (input.side === "BUY") {
       return this.createBankBuyOrder(userId, input, customer?.bushaCustomerId ?? null, live);
     }
@@ -745,8 +745,9 @@ export class CryptoService {
   }
 
   /**
-   * Buy crypto by paying a Busha-generated temporary NGN bank account.
-   * USD/SAR amounts are FX-converted to NGN before the Busha quote (user still pays NGN to the bank).
+   * Buy crypto funded from the user's Fulus NGN ledger.
+   * Busha still creates a customer temp bank account for the buy rail; we payout
+   * that amount from the **business master** float (PalmPay-style).
    */
   private async createBankBuyOrder(
     userId: string,
@@ -785,64 +786,123 @@ export class CryptoService {
     }
     if (!(ngnAmount > 0)) throw new AppError("Invalid payment amount");
 
+    // Debit Fulus NGN first (virtual ledger). Master float funds Busha separately.
+    const debitTx = await walletService.debit({
+      userId,
+      currency: "NGN",
+      amount: ngnAmount,
+      type: "CRYPTO_BUY",
+      description: `Buy ${base} · ₦${ngnAmount.toLocaleString()}`,
+      provider: live ? "busha" : "simulated",
+      metadata: asJson({
+        kind: "crypto_bank_buy_debit",
+        side: "BUY",
+        creditCurrency,
+        userFiat,
+        userFiatAmount: amount,
+        fxBridge,
+        walletDebited: true,
+        masterFloatBuy: true,
+      }),
+    });
+
     let transfer: Record<string, unknown>;
     let quoteRaw: Record<string, unknown>;
     let receiveAmount: number;
     let providerRef: string;
+    let masterPayout: Record<string, unknown> | null = null;
+    let masterRecipientId: string | undefined;
 
-    if (live) {
-      if (!customerId) throw new AppError("Busha customer required", 403, "BUSHA_CUSTOMER_REQUIRED");
-      const q = unwrapData(
-        await bushaClient.createQuote(
-          {
-            source_currency: "NGN",
-            target_currency: base,
-            source_amount: String(ngnAmount),
-            pay_in: { type: "temporary_bank_account" },
-            pay_out: { type: "balance" },
+    try {
+      if (live) {
+        if (!customerId) throw new AppError("Busha customer required", 403, "BUSHA_CUSTOMER_REQUIRED");
+        const q = unwrapData(
+          await bushaClient.createQuote(
+            {
+              source_currency: "NGN",
+              target_currency: base,
+              source_amount: String(ngnAmount),
+              pay_in: { type: "temporary_bank_account" },
+              pay_out: { type: "balance" },
+            },
+            customerId,
+          ),
+        );
+        const quoteId = strOf(q, ["id"]);
+        if (!quoteId) throw new AppError("Busha quote missing id", 502);
+        quoteRaw = q;
+        receiveAmount = Number(strOf(q, ["target_amount", "receive_amount"]) ?? 0);
+        transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, customerId));
+        providerRef = strOf(transfer, ["id", "reference"]) ?? makeReference("BU");
+        if (!(receiveAmount > 0)) {
+          receiveAmount = Number(strOf(transfer, ["target_amount", "receive_amount"]) ?? 0);
+        }
+
+        const bank = extractTempBank(transfer);
+        if (!bank.accountNumber) {
+          throw new AppError("Busha did not return temporary bank account details", 502);
+        }
+
+        const { bushaFloatService } = await import("../../../providers/busha/float.js");
+        const payout = await bushaFloatService.payoutFromMaster({
+          amount: ngnAmount,
+          accountName: bank.accountName || "Busha Buy",
+          accountNumber: bank.accountNumber,
+          bankName: bank.bankName || "Busha Partner Bank",
+          bankCode: bank.bankCode || "000",
+        });
+        masterRecipientId = payout.recipientId;
+        masterPayout = {
+          transferId: payout.transferId,
+          quoteId: payout.quoteId,
+          recipientId: payout.recipientId,
+          amount: payout.amount,
+        };
+      } else {
+        receiveAmount =
+          base === "USDT" || base === "USDC"
+            ? ngnAmount / 1580
+            : SIM_RATES[base]
+              ? ngnAmount / (SIM_RATES[base] * 1580)
+              : ngnAmount / 1580;
+        providerRef = simRef("BU");
+        quoteRaw = {
+          id: simRef("CQ"),
+          source_currency: "NGN",
+          target_currency: base,
+          source_amount: String(ngnAmount),
+          target_amount: String(receiveAmount),
+          simulated: true,
+        };
+        transfer = {
+          id: providerRef,
+          simulated: true,
+          source_amount: String(ngnAmount),
+          target_amount: String(receiveAmount),
+          pay_in: {
+            type: "temporary_bank_account",
+            expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+            recipient_details: {
+              account_name: "Fulus Demo / Busha",
+              account_number: `70${String(Date.now()).slice(-8)}`,
+              bank_name: "Demo Microfinance Bank",
+              bank_code: "999999",
+            },
           },
-          customerId,
-        ),
-      );
-      const quoteId = strOf(q, ["id"]);
-      if (!quoteId) throw new AppError("Busha quote missing id", 502);
-      quoteRaw = q;
-      receiveAmount = Number(strOf(q, ["target_amount", "receive_amount"]) ?? 0);
-      transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, customerId));
-      providerRef = strOf(transfer, ["id", "reference"]) ?? makeReference("BU");
-      if (!(receiveAmount > 0)) {
-        receiveAmount = Number(strOf(transfer, ["target_amount", "receive_amount"]) ?? 0);
+        };
+        masterPayout = { simulated: true, amount: ngnAmount };
       }
-    } else {
-      receiveAmount =
-        base === "USDT" || base === "USDC"
-          ? ngnAmount / 1580
-          : (SIM_RATES[base] ? ngnAmount / (SIM_RATES[base] * 1580) : ngnAmount / 1580);
-      providerRef = simRef("BU");
-      quoteRaw = {
-        id: simRef("CQ"),
-        source_currency: "NGN",
-        target_currency: base,
-        source_amount: String(ngnAmount),
-        target_amount: String(receiveAmount),
-        simulated: true,
-      };
-      transfer = {
-        id: providerRef,
-        simulated: true,
-        source_amount: String(ngnAmount),
-        target_amount: String(receiveAmount),
-        pay_in: {
-          type: "temporary_bank_account",
-          expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
-          recipient_details: {
-            account_name: "Fulus Demo / Busha",
-            account_number: `70${String(Date.now()).slice(-8)}`,
-            bank_name: "Demo Microfinance Bank",
-            bank_code: "999999",
-          },
-        },
-      };
+    } catch (error) {
+      await walletService.credit({
+        userId,
+        currency: "NGN",
+        amount: ngnAmount,
+        type: "ADJUSTMENT",
+        description: `Refund failed crypto buy setup ${debitTx.reference}`,
+        provider: live ? "busha" : "simulated",
+        providerRef: `${debitTx.id}_setup_refund`,
+      });
+      throw error;
     }
 
     const bankAccount = {
@@ -851,22 +911,14 @@ export class CryptoService {
       currency: "NGN",
       userFiat,
       userFiatAmount: amount,
+      fundedByMaster: true,
     };
-    if (!bankAccount.accountNumber) {
-      throw new AppError("Busha did not return temporary bank account details", 502);
-    }
 
-    const pendingTx = await prisma.transaction.create({
+    await prisma.transaction.update({
+      where: { id: debitTx.id },
       data: {
-        userId,
-        type: "CRYPTO_BUY",
         status: "PENDING",
-        amount: ngnAmount,
-        currency: "NGN",
-        reference: makeReference("CBY"),
-        provider: live ? "busha" : "simulated",
         providerRef,
-        description: `Buy ${base} · pay ₦${ngnAmount.toLocaleString()} to Busha bank`,
         metadata: asJson({
           kind: "crypto_bank_buy_pending",
           side: "BUY",
@@ -874,7 +926,10 @@ export class CryptoService {
           creditAmount: receiveAmount,
           bankAccount,
           fxBridge,
-          walletDebited: false,
+          walletDebited: true,
+          masterFloatBuy: true,
+          masterPayout,
+          masterRecipientId,
           payInType: "temporary_bank_account",
         }),
       },
@@ -883,7 +938,7 @@ export class CryptoService {
     const order = await prisma.cryptoOrder.create({
       data: {
         userId,
-        transactionId: pendingTx.id,
+        transactionId: debitTx.id,
         side: "BUY",
         baseCurrency: base,
         quoteCurrency: userFiat,
@@ -901,12 +956,45 @@ export class CryptoService {
           creditAmount: receiveAmount,
           bankAccount,
           fxBridge,
-          walletDebited: false,
+          walletDebited: true,
+          masterFloatBuy: true,
+          masterPayout,
+          masterRecipientId,
           payInType: "temporary_bank_account",
           awaitingWebhook: live,
         }),
       },
     });
+
+    // Simulated: auto-settle crypto credit (master payout is fictional).
+    if (!live) {
+      const receipt = await walletService.credit({
+        userId,
+        currency: creditCurrency,
+        amount: receiveAmount,
+        type: "CRYPTO_BUY",
+        description: `Buy ${creditCurrency} (simulated master float)`,
+        provider: "simulated",
+        providerRef: `${providerRef}_credit`,
+        metadata: asJson({ orderId: order.id, simulated: true }),
+      });
+      await prisma.cryptoOrder.update({
+        where: { id: order.id },
+        data: {
+          status: "SUCCESS",
+          providerPayload: asJson({
+            ...asRecord(order.providerPayload),
+            creditSettled: true,
+            receiptTransactionId: receipt.id,
+          }),
+        },
+      });
+      await prisma.transaction.update({
+        where: { id: debitTx.id },
+        data: { status: "SUCCESS" },
+      });
+      return withBankAccount(await prisma.cryptoOrder.findUniqueOrThrow({ where: { id: order.id } }));
+    }
 
     return withBankAccount(order);
   }

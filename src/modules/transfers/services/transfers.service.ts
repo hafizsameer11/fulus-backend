@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import { useBushaLive } from "../../../lib/simulate.js";
+import { walletService } from "../../wallet/services/wallet.service.js";
 
 export const beneficiarySchema = z.object({
   type: z.enum(["BANK", "CRYPTO", "BILLER", "FULUS_USER"]),
@@ -192,8 +194,10 @@ export class TransfersService {
     const amount = new Prisma.Decimal(input.amount);
     const fee = new Prisma.Decimal(0);
     const total = amount.plus(fee);
+    const live = useBushaLive();
 
-    return prisma.$transaction(async (tx) => {
+    // Debit Fulus ledger first (remaining balance only).
+    const debit = await prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findUnique({
         where: { userId_currency: { userId, currency: "NGN" } },
       });
@@ -224,20 +228,20 @@ export class TransfersService {
         data: {
           userId,
           type: "WITHDRAWAL",
-          status: "SUCCESS",
+          status: live ? "PENDING" : "SUCCESS",
           amount,
           fee,
           currency: "NGN",
           reference: makeReference("BNK"),
-          description: input.narration ?? `Mock bank transfer to ${input.accountNumber}`,
+          description: input.narration ?? `Bank transfer to ${input.accountNumber}`,
           idempotencyKey: input.idempotencyKey,
-          provider: "mock",
+          provider: live ? "busha" : "mock",
           metadata: {
-            mock: true,
             accountName: input.accountName,
             accountNumber: input.accountNumber,
             bankCode: input.bankCode,
             bankName: input.bankName,
+            masterFloatPayout: live,
           },
         },
       });
@@ -266,13 +270,77 @@ export class TransfersService {
           bankCode: input.bankCode,
           bankName: input.bankName,
           narration: input.narration,
-          provider: "mock",
-          status: "SUCCESS",
+          provider: live ? "busha" : "mock",
+          status: live ? "PENDING" : "SUCCESS",
         },
       });
 
-      return { transaction, transfer, mock: true };
+      return { transaction, transfer, beneficiaryId };
     });
+
+    if (!live) {
+      return { ...debit, mock: true };
+    }
+
+    try {
+      const { bushaFloatService } = await import("../../../providers/busha/float.js");
+      const payout = await bushaFloatService.payoutFromMaster({
+        amount: Number(input.amount),
+        accountName: input.accountName,
+        accountNumber: input.accountNumber,
+        bankName: input.bankName || NG_BANKS.find((b) => b.code === input.bankCode)?.name || "Bank",
+        bankCode: input.bankCode,
+      });
+
+      await prisma.bankTransfer.update({
+        where: { id: debit.transfer.id },
+        data: {
+          providerRef: payout.transferId,
+          status: payout.simulated ? "SUCCESS" : "PENDING",
+        },
+      });
+      await prisma.transaction.update({
+        where: { id: debit.transaction.id },
+        data: {
+          providerRef: payout.transferId,
+          status: payout.simulated ? "SUCCESS" : "PENDING",
+          metadata: {
+            ...(typeof debit.transaction.metadata === "object" && debit.transaction.metadata
+              ? (debit.transaction.metadata as object)
+              : {}),
+            masterPayout: {
+              transferId: payout.transferId,
+              recipientId: payout.recipientId,
+              quoteId: payout.quoteId,
+            },
+          },
+        },
+      });
+
+      const transfer = await prisma.bankTransfer.findUniqueOrThrow({ where: { id: debit.transfer.id } });
+      const transaction = await prisma.transaction.findUniqueOrThrow({ where: { id: debit.transaction.id } });
+      return { transaction, transfer, mock: false, live: true };
+    } catch (error) {
+      // Refund Fulus ledger if Busha payout could not start.
+      await walletService.credit({
+        userId,
+        currency: "NGN",
+        amount: Number(input.amount),
+        type: "ADJUSTMENT",
+        description: `Refund failed bank withdrawal ${debit.transaction.reference}`,
+        provider: "busha",
+        providerRef: `${debit.transaction.id}_payout_refund`,
+      });
+      await prisma.bankTransfer.update({
+        where: { id: debit.transfer.id },
+        data: { status: "FAILED" },
+      });
+      await prisma.transaction.update({
+        where: { id: debit.transaction.id },
+        data: { status: "FAILED" },
+      });
+      throw error;
+    }
   }
 
   async lookupUser(q: string) {
