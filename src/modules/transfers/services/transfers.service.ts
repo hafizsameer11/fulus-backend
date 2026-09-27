@@ -35,8 +35,10 @@ export const fulusTransferSchema = z.object({
   idempotencyKey: z.string().optional(),
 });
 
+export const MIN_BANK_PAYOUT_NGN = 500;
+
 export const bankTransferSchema = z.object({
-  amount: z.number().positive(),
+  amount: z.number().min(MIN_BANK_PAYOUT_NGN, `Minimum bank payout is ₦${MIN_BANK_PAYOUT_NGN}`),
   accountNumber: z.string().min(10),
   accountName: z.string().min(2),
   bankCode: z.string().min(2),
