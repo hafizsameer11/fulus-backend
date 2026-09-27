@@ -124,10 +124,10 @@ export class TransfersService {
           raw = await bushaClient.resolveBankAccount({
             bank_code: input.bankCode,
             account_number: input.accountNumber,
-            channel: "bank",
+            channel: "bank_transfer",
           });
         } catch {
-          // Docs sample uses channel mobile_money for this endpoint.
+          // Docs sample uses mobile_money; NGN banks should use bank_transfer first.
           raw = await bushaClient.resolveBankAccount({
             bank_code: input.bankCode,
             account_number: input.accountNumber,

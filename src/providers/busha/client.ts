@@ -172,7 +172,7 @@ export class BushaClient {
       body: {
         currency_id: body.currency_id ?? "NGN",
         country_id: body.country_id ?? "NG",
-        channel: body.channel ?? "bank",
+        channel: body.channel ?? "bank_transfer",
         bank_code: body.bank_code,
         account_number: body.account_number,
       },
