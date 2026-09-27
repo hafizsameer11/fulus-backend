@@ -31,12 +31,14 @@ const envSchema = z.object({
   ESIM_GO_BASE_URL: z.string().url().default("https://api.esim-go.com/v2.5"),
   ESIM_GO_API_KEY: z.string().optional().default(""),
 
-  /** Flutterwave Standard Checkout — card deposits into NGN wallet */
+  /** Flutterwave — app public key (EXPO); API verifies with secret (must match TEST or LIVE). */
   FLUTTERWAVE_BASE_URL: z.string().url().default("https://api.flutterwave.com"),
+  /** Primary secret. Use FLWSECK_TEST-… while the app uses FLWPUBK_TEST-…. */
   FLUTTERWAVE_SECRET_KEY: z.string().optional().default(""),
+  /** Optional sandbox secret tried if primary (live) cannot verify a test charge. */
+  FLUTTERWAVE_TEST_SECRET_KEY: z.string().optional().default(""),
   FLUTTERWAVE_PUBLIC_KEY: z.string().optional().default(""),
   FLUTTERWAVE_WEBHOOK_SECRET: z.string().optional().default(""),
-  /** App / deep-link base used as Flutterwave redirect_url host when set */
   FLUTTERWAVE_REDIRECT_URL: z.string().optional().default(""),
 
   /** Custom SMTP (Hostinger, etc.) — required in production for OTP / reset emails */

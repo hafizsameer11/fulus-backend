@@ -35,9 +35,15 @@ export function hasEsimGoKeys() {
   return Boolean(env.ESIM_GO_API_KEY);
 }
 
+/** True when a real Flutterwave secret is configured (not an empty / placeholder value). */
 export function hasFlutterwaveKeys() {
-  // App uses public key for FlutterwaveCheckout; API uses secret for verify/webhooks.
-  return Boolean(env.FLUTTERWAVE_SECRET_KEY);
+  const k = (env.FLUTTERWAVE_SECRET_KEY || "").trim();
+  // Live: FLWSECK-…  Test: FLWSECK_TEST-…  (placeholders like "FLWSECK_TEST-" are too short)
+  return k.length >= 30 && /FLWSECK(_TEST)?-/i.test(k);
+}
+
+export function isFlutterwaveTestSecret(key = env.FLUTTERWAVE_SECRET_KEY) {
+  return /FLWSECK_TEST-/i.test((key || "").trim());
 }
 
 export function usePagocardsLive() {
@@ -61,7 +67,10 @@ export function useEsimGoLive() {
 }
 
 export function useFlutterwaveLive() {
-  return hasFlutterwaveKeys() && !simulateProviders();
+  if (!hasFlutterwaveKeys()) return false;
+  // TEST secret always verifies real sandbox charges (even if other providers are simulated).
+  if (isFlutterwaveTestSecret()) return true;
+  return !simulateProviders();
 }
 
 export function simRef(prefix: string) {

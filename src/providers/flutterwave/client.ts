@@ -4,7 +4,7 @@ import { providerFetch } from "../../lib/provider-http.js";
 import { useFlutterwaveLive } from "../../lib/simulate.js";
 
 /**
- * Flutterwave v3 Standard Checkout — hosted card payment page for wallet deposits.
+ * Flutterwave v3 — verify card deposits with secret key (TEST or LIVE).
  * Docs: https://developer.flutterwave.com/docs/collecting-payments/standard
  */
 export class FlutterwaveClient {
@@ -14,9 +14,12 @@ export class FlutterwaveClient {
       method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
       body?: unknown;
       query?: Record<string, string | number | boolean | undefined | null>;
+      /** Override secret (e.g. TEST key fallback). */
+      secretKey?: string;
     } = {},
   ) {
-    if (!env.FLUTTERWAVE_SECRET_KEY) {
+    const secret = (options.secretKey || env.FLUTTERWAVE_SECRET_KEY || "").trim();
+    if (!secret) {
       throw new ProviderError("flutterwave", "API key is not configured");
     }
 
@@ -26,7 +29,7 @@ export class FlutterwaveClient {
       body: options.body,
       query: options.query,
       headers: {
-        Authorization: `Bearer ${env.FLUTTERWAVE_SECRET_KEY}`,
+        Authorization: `Bearer ${secret}`,
       },
     });
 
@@ -35,6 +38,17 @@ export class FlutterwaveClient {
     }
 
     return data;
+  }
+
+  /** Secrets to try: primary, then optional TEST secret (for sandbox app + live primary). */
+  private secretsToTry(): string[] {
+    const primary = (env.FLUTTERWAVE_SECRET_KEY || "").trim();
+    const test = (env.FLUTTERWAVE_TEST_SECRET_KEY || "").trim();
+    const out: string[] = [];
+    for (const k of [primary, test]) {
+      if (k.length >= 30 && /FLWSECK/i.test(k) && !out.includes(k)) out.push(k);
+    }
+    return out;
   }
 
   createPayment(body: {
@@ -65,21 +79,37 @@ export class FlutterwaveClient {
     });
   }
 
-  verifyTransaction(idOrRef: { id?: string | number; tx_ref?: string }) {
-    if (idOrRef.id != null) {
-      return this.request<{
-        status: string;
-        message: string;
-        data?: Record<string, unknown>;
-      }>(`/v3/transactions/${idOrRef.id}/verify`);
+  async verifyTransaction(idOrRef: { id?: string | number; tx_ref?: string }) {
+    const secrets = this.secretsToTry();
+    if (!secrets.length) {
+      throw new ProviderError("flutterwave", "API key is not configured");
     }
-    return this.request<{
-      status: string;
-      message: string;
-      data?: Record<string, unknown>;
-    }>("/v3/transactions/verify_by_reference", {
-      query: { tx_ref: idOrRef.tx_ref },
-    });
+
+    let lastError: unknown;
+    for (const secretKey of secrets) {
+      try {
+        if (idOrRef.id != null && String(idOrRef.id) !== "") {
+          return await this.request<{
+            status: string;
+            message: string;
+            data?: Record<string, unknown>;
+          }>(`/v3/transactions/${idOrRef.id}/verify`, { secretKey });
+        }
+        return await this.request<{
+          status: string;
+          message: string;
+          data?: Record<string, unknown>;
+        }>("/v3/transactions/verify_by_reference", {
+          query: { tx_ref: idOrRef.tx_ref },
+          secretKey,
+        });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new ProviderError("flutterwave", "Verification failed");
   }
 
   /** Flutterwave sends `verif-hash` header equal to FLUTTERWAVE_WEBHOOK_SECRET when configured. */

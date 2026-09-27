@@ -366,24 +366,47 @@ button:active{opacity:.85}button:disabled{opacity:.5}
     let flwData: Record<string, unknown> | undefined = opts.providerPayload;
 
     if (flutterwaveLive() && !opts.forceSimulate) {
-      const verify = opts.transactionId
-        ? await flutterwaveClient.verifyTransaction({ id: opts.transactionId })
-        : await flutterwaveClient.verifyTransaction({ tx_ref: txRef });
-      flwData = asRecord(verify.data);
-      const status = String(flwData.status ?? "").toLowerCase();
-      verified = verify.status === "success" && (status === "successful" || status === "success");
-      if (!verified) {
-        throw new AppError("Card payment not completed yet", 402, "PAYMENT_PENDING");
-      }
-      const paidAmount = Number(flwData.amount ?? 0);
-      const expectedCharge = Number(meta.chargeAmount ?? 0);
-      if (expectedCharge > 0 && paidAmount + 0.01 < expectedCharge) {
-        throw new AppError("Paid amount does not match charge", 400, "AMOUNT_MISMATCH");
+      try {
+        let verify: { status: string; data?: Record<string, unknown> };
+        if (opts.transactionId != null && String(opts.transactionId) !== "") {
+          try {
+            verify = await flutterwaveClient.verifyTransaction({ id: opts.transactionId });
+          } catch {
+            verify = await flutterwaveClient.verifyTransaction({ tx_ref: txRef });
+          }
+        } else {
+          verify = await flutterwaveClient.verifyTransaction({ tx_ref: txRef });
+        }
+        flwData = asRecord(verify.data);
+        const status = String(flwData.status ?? "").toLowerCase();
+        verified =
+          verify.status === "success" &&
+          (status === "successful" || status === "success" || status === "completed");
+        if (!verified) {
+          throw new AppError("Card payment not completed yet", 402, "PAYMENT_PENDING");
+        }
+        const paidAmount = Number(flwData.amount ?? 0);
+        const expectedCharge = Number(meta.chargeAmount ?? 0);
+        if (expectedCharge > 0 && paidAmount + 0.01 < expectedCharge) {
+          throw new AppError("Paid amount does not match charge", 400, "AMOUNT_MISMATCH");
+        }
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        // Typical: app charged with FLWPUBK_TEST but API has a LIVE secret (or vice versa).
+        throw new AppError(
+          "Payment succeeded at checkout but could not be verified. Set FLUTTERWAVE_SECRET_KEY to the matching FLWSECK_TEST key while testing.",
+          402,
+          "NOT_VERIFIED",
+        );
       }
     }
 
     if (!verified) {
-      throw new AppError("Unable to verify card payment", 402, "NOT_VERIFIED");
+      throw new AppError(
+        "Unable to verify card payment. Configure a Flutterwave TEST secret on the API, or retry the deposit.",
+        402,
+        "NOT_VERIFIED",
+      );
     }
 
     const transaction = await walletService.credit({
