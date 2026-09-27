@@ -36,7 +36,7 @@ export function hasEsimGoKeys() {
 }
 
 export function hasFlutterwaveKeys() {
-  // Hosted checkout + verify use the secret key only.
+  // App uses public key for FlutterwaveCheckout; API uses secret for verify/webhooks.
   return Boolean(env.FLUTTERWAVE_SECRET_KEY);
 }
 

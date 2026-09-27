@@ -125,8 +125,8 @@ export class DepositsService {
 
   /**
    * Start a card → NGN wallet deposit.
-   * Live: hosted payment link (secret key). Sim: brand-neutral confirm page in WebView.
-   * Public keys are never returned to the app.
+   * App opens FlutterwaveCheckout in a WebView (public key); API verifies with secret key.
+   * `checkoutUrl` is only a simulate fallback when the app has no public key.
    */
   async initiateCardDeposit(userId: string, input: z.infer<typeof initiateCardDepositSchema>) {
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
@@ -169,7 +169,7 @@ export class DepositsService {
           rateApplied,
           midRate,
           walletCurrency: input.walletCurrency,
-          mode: live ? "hosted" : "simulate",
+          mode: "inline",
         },
         instructions: {
           payCurrency: input.payCurrency,
@@ -186,40 +186,10 @@ export class DepositsService {
       [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.email.split("@")[0] || "Fulus user";
 
     const apiBase = env.APP_URL.replace(/\/$/, "");
-    const returnUrl =
-      (env.FLUTTERWAVE_REDIRECT_URL || `${apiBase}/api/v1/deposits/card/return`).replace(/\/$/, "") +
-      `?depositId=${encodeURIComponent(deposit.id)}` +
-      `&tx_ref=${encodeURIComponent(txRef)}`;
-
-    let checkoutUrl =
+    const checkoutUrl =
       `${apiBase}/api/v1/deposits/card/inline-checkout` +
       `?depositId=${encodeURIComponent(deposit.id)}` +
       `&tx_ref=${encodeURIComponent(txRef)}`;
-
-    if (live) {
-      const payment = await flutterwaveClient.createPayment({
-        tx_ref: txRef,
-        amount: chargeAmount,
-        currency: input.payCurrency,
-        redirect_url: returnUrl,
-        customer: {
-          email: user.email,
-          name: customerName,
-          phonenumber: user.phone ?? undefined,
-        },
-        meta: { depositId: deposit.id },
-        payment_options: "card",
-        customizations: {
-          title: "Fulus",
-          description: `Wallet deposit · ₦${receiveAmount.toLocaleString()}`,
-        },
-      });
-      const link = payment.data?.link;
-      if (!link) {
-        throw new AppError("Could not start card payment", 502, "CHECKOUT_FAILED");
-      }
-      checkoutUrl = link;
-    }
 
     await prisma.deposit.update({
       where: { id: deposit.id },
@@ -227,7 +197,6 @@ export class DepositsService {
         instructions: asJson({
           ...asRecord(deposit.instructions),
           checkoutUrl,
-          returnUrl,
           customerEmail: user.email,
           customerName,
           customerPhone: user.phone ?? null,
@@ -239,8 +208,8 @@ export class DepositsService {
     return {
       depositId: deposit.id,
       txRef,
+      /** Simulate fallback only — preferred path is in-app FlutterwaveCheckout HTML. */
       checkoutUrl,
-      /** @deprecated use checkoutUrl — kept for older clients */
       paymentLink: checkoutUrl,
       simulated: !live,
       customer: {
