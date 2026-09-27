@@ -117,7 +117,7 @@ async function requireBushaCustomer(userId: string) {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user?.bushaCustomerId) {
     throw new AppError(
-      "Complete Busha customer KYC before using live crypto.",
+      "Complete identity verification before using live crypto.",
       403,
       "BUSHA_CUSTOMER_REQUIRED",
     );
@@ -815,7 +815,7 @@ export class CryptoService {
 
     try {
       if (live) {
-        if (!customerId) throw new AppError("Busha customer required", 403, "BUSHA_CUSTOMER_REQUIRED");
+        if (!customerId) throw new AppError("Crypto profile required", 403, "BUSHA_CUSTOMER_REQUIRED");
         const q = unwrapData(
           await bushaClient.createQuote(
             {
@@ -829,7 +829,7 @@ export class CryptoService {
           ),
         );
         const quoteId = strOf(q, ["id"]);
-        if (!quoteId) throw new AppError("Busha quote missing id", 502);
+        if (!quoteId) throw new AppError("Could not create crypto quote", 502);
         quoteRaw = q;
         receiveAmount = Number(strOf(q, ["target_amount", "receive_amount"]) ?? 0);
         transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, customerId));
@@ -840,15 +840,15 @@ export class CryptoService {
 
         const bank = extractTempBank(transfer);
         if (!bank.accountNumber) {
-          throw new AppError("Busha did not return temporary bank account details", 502);
+          throw new AppError("Temporary bank account details were not returned", 502);
         }
 
         const { bushaFloatService } = await import("../../../providers/busha/float.js");
         const payout = await bushaFloatService.payoutFromMaster({
           amount: ngnAmount,
-          accountName: bank.accountName || "Busha Buy",
+          accountName: bank.accountName || "Fulus Buy",
           accountNumber: bank.accountNumber,
-          bankName: bank.bankName || "Busha Partner Bank",
+          bankName: bank.bankName || "Partner Bank",
           bankCode: bank.bankCode || "000",
         });
         masterRecipientId = payout.recipientId;
@@ -883,7 +883,7 @@ export class CryptoService {
             type: "temporary_bank_account",
             expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
             recipient_details: {
-              account_name: "Fulus Demo / Busha",
+              account_name: "Fulus Demo",
               account_number: `70${String(Date.now()).slice(-8)}`,
               bank_name: "Demo Microfinance Bank",
               bank_code: "999999",
@@ -1048,14 +1048,14 @@ export class CryptoService {
       );
       const quote = unwrapData(quoteRaw);
       const quoteId = strOf(quote, ["id"]);
-      if (!quoteId) throw new AppError("Could not create Busha deposit quote", 502);
+      if (!quoteId) throw new AppError("Could not create deposit quote", 502);
       const transferRaw = await bushaClient.createTransfer({ quote_id: quoteId }, customer.bushaCustomerId!);
       const transfer = unwrapData(transferRaw);
       const payIn = asRecord(transfer.pay_in);
       address = strOf(payIn, ["address"]) ?? strOf(transfer, ["address"]);
     }
 
-    if (!address) throw new AppError("Busha did not return a deposit address", 502);
+    if (!address) throw new AppError("Deposit address was not returned", 502);
 
     if (existing) {
       return prisma.cryptoAddress.update({
@@ -1136,7 +1136,7 @@ export class CryptoService {
       );
       const quote = unwrapData(quoteRaw);
       const quoteId = strOf(quote, ["id"]);
-      if (!quoteId) throw new AppError("Busha withdraw quote missing id", 502);
+      if (!quoteId) throw new AppError("Withdraw quote missing id", 502);
 
       const transferRaw = await bushaClient.createTransfer({ quote_id: quoteId }, customer.bushaCustomerId!);
       const transfer = unwrapData(transferRaw);

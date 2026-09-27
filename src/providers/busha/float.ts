@@ -55,9 +55,9 @@ function extractBank(transfer: Record<string, unknown>): TempBankDetails {
   const payIn = asRecord(transfer.pay_in);
   const details = asRecord(payIn.recipient_details);
   return {
-    accountName: str(details.account_name) ?? str(details.accountName) ?? "Busha",
+    accountName: str(details.account_name) ?? str(details.accountName) ?? "Fulus",
     accountNumber: str(details.account_number) ?? str(details.accountNumber) ?? "",
-    bankName: str(details.bank_name) ?? str(details.bankName) ?? "Busha Partner Bank",
+    bankName: str(details.bank_name) ?? str(details.bankName) ?? "Partner Bank",
     bankCode: str(details.bank_code) ?? str(details.bankCode),
     expiresAt: str(payIn.expires_at) ?? str(payIn.expiresAt),
   };
@@ -126,7 +126,7 @@ export class BushaFloatService {
         targetAmount: sourceAmount,
         feeAmount: 0,
         bank: {
-          accountName: "Fulus Master / Busha Sim",
+          accountName: "Fulus Deposit",
           accountNumber: `70${String(Date.now()).slice(-8)}`,
           bankName: "Demo Microfinance Bank",
           bankCode: "999999",
@@ -149,15 +149,15 @@ export class BushaFloatService {
       ),
     );
     const quoteId = str(quoteRaw.id);
-    if (!quoteId) throw new AppError("Busha deposit quote missing id", 502);
+    if (!quoteId) throw new AppError("Deposit quote missing id", 502);
 
     const transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, null));
     const transferId = str(transfer.id) ?? str(transfer.reference);
-    if (!transferId) throw new AppError("Busha deposit transfer missing id", 502);
+    if (!transferId) throw new AppError("Deposit transfer missing id", 502);
 
     const bank = extractBank(transfer);
     if (!bank.accountNumber) {
-      throw new AppError("Busha did not return temporary bank account details", 502);
+      throw new AppError("Temporary bank account details were not returned", 502);
     }
 
     const targetAmount =
@@ -200,7 +200,7 @@ export class BushaFloatService {
       ),
     );
     const id = str(raw.id);
-    if (!id) throw new AppError("Busha recipient missing id", 502);
+    if (!id) throw new AppError("Bank recipient missing id", 502);
     return id;
   }
 
@@ -249,11 +249,11 @@ export class BushaFloatService {
       ),
     );
     const quoteId = str(quoteRaw.id);
-    if (!quoteId) throw new AppError("Busha payout quote missing id", 502);
+    if (!quoteId) throw new AppError("Payout quote missing id", 502);
 
     const transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, null));
     const transferId = str(transfer.id) ?? str(transfer.reference);
-    if (!transferId) throw new AppError("Busha payout transfer missing id", 502);
+    if (!transferId) throw new AppError("Payout transfer missing id", 502);
 
     return {
       transferId,

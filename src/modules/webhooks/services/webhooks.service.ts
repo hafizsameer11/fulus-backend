@@ -125,7 +125,7 @@ export class WebhooksService {
         data: { processed: true, error: null },
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Busha webhook processing failed";
+      const message = error instanceof Error ? error.message : "Webhook processing failed";
       await prisma.webhookEvent.update({
         where: { id: event.id },
         data: { processed: false, error: message },
@@ -175,7 +175,7 @@ export class WebhooksService {
         userId: user.id,
         category: "crypto",
         title: "Crypto deposit received",
-        body: `Busha reported a ${amount} ${currency} deposit (${reference}).`,
+        body: `A ${amount} ${currency} deposit was reported (${reference}).`,
       });
       return;
     }
@@ -194,10 +194,10 @@ export class WebhooksService {
       amount,
       type: crypto ? "CRYPTO_RECEIVE" : "DEPOSIT",
       description: str(data.channel)
-        ? `Busha ${String(data.channel)} deposit`
+        ? `Bank ${String(data.channel)} deposit`
         : crypto
           ? `Received ${currency}`
-          : "Busha deposit",
+          : "Bank deposit",
       provider: "busha",
       providerRef: reference,
       metadata: asJson(data),
@@ -225,7 +225,7 @@ export class WebhooksService {
       userId: user.id,
       category: crypto ? "crypto" : "wallet",
       title: crypto ? "Crypto received" : "Deposit confirmed",
-      body: `${amount} ${currency} was credited from Busha.`,
+      body: `${amount} ${currency} was credited to your wallet.`,
     });
   }
 

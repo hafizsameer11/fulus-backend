@@ -277,11 +277,11 @@ export class KycService {
         await createInboxMessage({
           userId,
           category: "kyc",
-          title: "Busha KYC pending",
+          title: "Crypto KYC pending",
           body:
             err instanceof Error
-              ? `NIN passed, but Busha customer setup failed: ${err.message}`
-              : "NIN passed, but Busha customer setup failed. Support will retry.",
+              ? `NIN passed, but crypto profile setup failed: ${err.message}`
+              : "NIN passed, but crypto profile setup failed. Support will retry.",
         });
       }
     } catch (error) {

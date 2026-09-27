@@ -639,14 +639,14 @@ document.getElementById('pay').onclick=function(){
     const creditAmount =
       opts.creditedAmount ??
       Number(meta.targetAmount ?? deposit.amount ?? 0);
-    if (!(creditAmount > 0)) throw new AppError("Invalid busha deposit credit amount");
+    if (!(creditAmount > 0)) throw new AppError("Invalid deposit credit amount");
 
     const transaction = await walletService.credit({
       userId: deposit.userId,
       currency: "NGN",
       amount: creditAmount,
       type: "DEPOSIT",
-      description: `Busha bank deposit · ${opts.transferId}`,
+      description: `Bank deposit · ${opts.transferId}`,
       provider: deposit.provider ?? "busha",
       providerRef: opts.transferId,
       metadata: asJson({
@@ -692,7 +692,7 @@ document.getElementById('pay').onclick=function(){
       return { deposit, alreadySettled: true };
     }
     if (useBushaLive() && deposit.provider === "busha") {
-      throw new AppError("Live Busha deposits settle via webhook only", 400, "LIVE_WEBHOOK_ONLY");
+      throw new AppError("Live bank deposits settle via webhook only", 400, "LIVE_WEBHOOK_ONLY");
     }
     return this.settleBushaMasterDeposit({
       transferId: deposit.providerRef!,

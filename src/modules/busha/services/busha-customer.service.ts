@@ -83,7 +83,7 @@ export class BushaCustomerService {
         userId: user.id,
         category: "kyc",
         title: "Crypto KYC ready",
-        body: "Your NIN selfie passed. Busha customer was created in demo mode.",
+        body: "Your NIN selfie passed. Crypto profile was created in demo mode.",
       });
       return { id: fakeId, status: "active", simulated: true };
     }
@@ -135,7 +135,7 @@ export class BushaCustomerService {
     }
 
     if (!customerId) {
-      throw new Error("Busha did not return a customer id");
+      throw new Error("Crypto profile setup failed — missing customer id");
     }
 
     try {
@@ -168,11 +168,11 @@ export class BushaCustomerService {
     await createInboxMessage({
       userId: user.id,
       category: "kyc",
-      title: status === "active" ? "Busha KYC approved" : "Busha KYC submitted",
+      title: status === "active" ? "Crypto KYC approved" : "Crypto KYC submitted",
       body:
         status === "active"
-          ? "Your Busha customer profile is active. Crypto trading is unlocked."
-          : "Your NIN and selfie were sent to Busha for review. We'll notify you when verification finishes.",
+          ? "Your identity check passed. Crypto trading is unlocked."
+          : "Your NIN and selfie were submitted for review. We'll notify you when verification finishes.",
     });
 
     return { id: customerId, status, payload: createPayload };
@@ -191,24 +191,24 @@ export class BushaCustomerService {
       await createInboxMessage({
         userId: user.id,
         category: "kyc",
-        title: "Busha KYC approved",
-        body: "Your Busha identity check passed. You can use crypto features.",
+        title: "Crypto KYC approved",
+        body: "Your identity check passed. You can use crypto features.",
       });
     } else if (status === "rejected") {
       await createInboxMessage({
         userId: user.id,
         category: "kyc",
-        title: "Busha KYC rejected",
+        title: "Crypto KYC rejected",
         body: rejectionReason?.trim()
           ? `${rejectionReason.trim()} Open Verification to update your details.`
-          : "Busha could not verify your documents. Open Verification to resubmit NIN and selfie.",
+          : "We could not verify your documents. Open Verification to resubmit NIN and selfie.",
       });
     } else if (status === "in_review") {
       await createInboxMessage({
         userId: user.id,
         category: "kyc",
-        title: "Busha KYC under review",
-        body: "Your Busha customer verification is still under review.",
+        title: "Crypto KYC under review",
+        body: "Your identity verification is still under review.",
       });
     }
 
