@@ -36,8 +36,8 @@ export function hasEsimGoKeys() {
 }
 
 export function hasFlutterwaveKeys() {
-  // Inline checkout needs public key; verify/webhook needs secret.
-  return Boolean(env.FLUTTERWAVE_PUBLIC_KEY && env.FLUTTERWAVE_SECRET_KEY);
+  // Hosted checkout + verify use the secret key only.
+  return Boolean(env.FLUTTERWAVE_SECRET_KEY);
 }
 
 export function usePagocardsLive() {

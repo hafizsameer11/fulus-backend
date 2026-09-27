@@ -125,7 +125,8 @@ export class DepositsService {
 
   /**
    * Start a card → NGN wallet deposit.
-   * Returns a WebView checkout URL that loads FlutterwaveCheckout (inline) with the public key.
+   * Live: hosted payment link (secret key). Sim: brand-neutral confirm page in WebView.
+   * Public keys are never returned to the app.
    */
   async initiateCardDeposit(userId: string, input: z.infer<typeof initiateCardDepositSchema>) {
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
@@ -168,7 +169,7 @@ export class DepositsService {
           rateApplied,
           midRate,
           walletCurrency: input.walletCurrency,
-          mode: "inline",
+          mode: live ? "hosted" : "simulate",
         },
         instructions: {
           payCurrency: input.payCurrency,
@@ -185,10 +186,40 @@ export class DepositsService {
       [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.email.split("@")[0] || "Fulus user";
 
     const apiBase = env.APP_URL.replace(/\/$/, "");
-    const checkoutUrl =
+    const returnUrl =
+      (env.FLUTTERWAVE_REDIRECT_URL || `${apiBase}/api/v1/deposits/card/return`).replace(/\/$/, "") +
+      `?depositId=${encodeURIComponent(deposit.id)}` +
+      `&tx_ref=${encodeURIComponent(txRef)}`;
+
+    let checkoutUrl =
       `${apiBase}/api/v1/deposits/card/inline-checkout` +
       `?depositId=${encodeURIComponent(deposit.id)}` +
       `&tx_ref=${encodeURIComponent(txRef)}`;
+
+    if (live) {
+      const payment = await flutterwaveClient.createPayment({
+        tx_ref: txRef,
+        amount: chargeAmount,
+        currency: input.payCurrency,
+        redirect_url: returnUrl,
+        customer: {
+          email: user.email,
+          name: customerName,
+          phonenumber: user.phone ?? undefined,
+        },
+        meta: { depositId: deposit.id },
+        payment_options: "card",
+        customizations: {
+          title: "Fulus",
+          description: `Wallet deposit · ₦${receiveAmount.toLocaleString()}`,
+        },
+      });
+      const link = payment.data?.link;
+      if (!link) {
+        throw new AppError("Could not start card payment", 502, "CHECKOUT_FAILED");
+      }
+      checkoutUrl = link;
+    }
 
     await prisma.deposit.update({
       where: { id: deposit.id },
@@ -196,6 +227,7 @@ export class DepositsService {
         instructions: asJson({
           ...asRecord(deposit.instructions),
           checkoutUrl,
+          returnUrl,
           customerEmail: user.email,
           customerName,
           customerPhone: user.phone ?? null,
@@ -207,11 +239,9 @@ export class DepositsService {
     return {
       depositId: deposit.id,
       txRef,
-      /** WebView opens this HTML page — loads FlutterwaveCheckout with public key. */
       checkoutUrl,
       /** @deprecated use checkoutUrl — kept for older clients */
       paymentLink: checkoutUrl,
-      publicKey: live ? env.FLUTTERWAVE_PUBLIC_KEY : "",
       simulated: !live,
       customer: {
         email: user.email,
@@ -227,11 +257,10 @@ export class DepositsService {
       receiveAmount,
       rateApplied,
       midRate,
-      provider: live ? "flutterwave" : "flutterwave-sim",
     };
   }
 
-  /** HTML page for in-app WebView: FlutterwaveCheckout (inline) or simulate UI. */
+  /** Simulate-only confirm page for WebView when card rails are not live. */
   async inlineCheckoutHtml(query: { depositId?: string; tx_ref?: string }) {
     const deposit = query.depositId
       ? await prisma.deposit.findUnique({ where: { id: query.depositId } })
@@ -247,152 +276,18 @@ export class DepositsService {
     }
 
     const meta = asRecord(deposit.metadata);
-    const instructions = asRecord(deposit.instructions);
     const txRef = deposit.providerRef ?? query.tx_ref ?? "";
     const amount = Number(meta.chargeAmount ?? 0);
     const currency = String(meta.payCurrency ?? "USD");
-    const email = String(instructions.customerEmail ?? "user@fulus.app");
-    const name = String(instructions.customerName ?? "Fulus user");
-    const phone = instructions.customerPhone ? String(instructions.customerPhone) : "";
     const receiveAmount = Number(meta.receiveAmount ?? deposit.amount ?? 0);
-    const simulated = deposit.provider === "flutterwave-sim" || !flutterwaveLive();
-    const publicKey = env.FLUTTERWAVE_PUBLIC_KEY;
 
-    if (simulated || !publicKey) {
-      return this.buildSimulateCheckoutHtml({
-        depositId: deposit.id,
-        txRef,
-        amount,
-        currency,
-        receiveAmount,
-      });
-    }
-
-    return this.buildInlineCheckoutHtml({
-      publicKey,
+    return this.buildSimulateCheckoutHtml({
       depositId: deposit.id,
       txRef,
       amount,
       currency,
-      email,
-      name,
-      phone,
       receiveAmount,
     });
-  }
-
-  private buildInlineCheckoutHtml(opts: {
-    publicKey: string;
-    depositId: string;
-    txRef: string;
-    amount: number;
-    currency: string;
-    email: string;
-    name: string;
-    phone: string;
-    receiveAmount: number;
-  }) {
-    const cfg = JSON.stringify({
-      public_key: opts.publicKey,
-      tx_ref: opts.txRef,
-      amount: opts.amount,
-      currency: opts.currency,
-      payment_options: "card",
-      customer: {
-        email: opts.email,
-        name: opts.name,
-        ...(opts.phone ? { phonenumber: opts.phone } : {}),
-      },
-      customizations: {
-        title: "Fulus",
-        description: `NGN wallet deposit · ₦${opts.receiveAmount.toLocaleString()}`,
-      },
-      meta: {
-        depositId: opts.depositId,
-      },
-    });
-
-    return `<!doctype html>
-<html><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
-<title>Fulus · Pay with card</title>
-<style>
-  html,body{margin:0;min-height:100%;background:#0A0A0A;color:#fff;font-family:system-ui,-apple-system,sans-serif}
-  .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
-  .card{max-width:380px;width:100%;background:#161616;border-radius:24px;padding:28px 22px;text-align:center}
-  .badge{display:inline-flex;background:#2e1065;color:#c4b5fd;font-size:11px;font-weight:600;padding:6px 10px;border-radius:999px;margin-bottom:14px}
-  h1{font-size:20px;margin:0 0 8px}p{opacity:.65;font-size:13px;line-height:1.5;margin:0 0 18px}
-  .amt{font-size:28px;font-weight:700;margin:8px 0 4px}
-  .sub{font-size:12px;opacity:.5;margin-bottom:20px}
-  button{width:100%;border:0;border-radius:16px;background:#FFD60A;color:#0A0A0A;font-weight:700;font-size:15px;padding:16px;cursor:pointer}
-  .err{color:#f87171;font-size:12px;margin-top:12px;display:none}
-</style>
-</head>
-<body>
-<div class="wrap"><div class="card">
-  <span class="badge">Flutterwave · Secure</span>
-  <h1>Pay with card</h1>
-  <p>Visa, Mastercard &amp; Verve. Card details stay with Flutterwave.</p>
-  <div class="amt">${opts.currency} ${opts.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-  <div class="sub">Wallet receives ₦${opts.receiveAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
-  <button type="button" id="pay">Continue to Flutterwave</button>
-  <p class="err" id="err"></p>
-</div></div>
-<script src="https://checkout.flutterwave.com/v3.js"></script>
-<script>
-(function () {
-  var cfg = ${cfg};
-  var depositId = ${JSON.stringify(opts.depositId)};
-  function post(msg) {
-    try {
-      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-        window.ReactNativeWebView.postMessage(JSON.stringify(msg));
-      }
-    } catch (e) {}
-    try { window.parent && window.parent.postMessage(msg, "*"); } catch (e2) {}
-  }
-  function showErr(t) {
-    var el = document.getElementById("err");
-    if (!el) return;
-    el.style.display = "block";
-    el.textContent = t;
-  }
-  function openCheckout() {
-    if (typeof FlutterwaveCheckout !== "function") {
-      showErr("Flutterwave failed to load. Check your connection.");
-      return;
-    }
-    FlutterwaveCheckout(Object.assign({}, cfg, {
-      callback: function (response) {
-        post({
-          type: "fulus-flw-success",
-          depositId: depositId,
-          tx_ref: response && (response.tx_ref || cfg.tx_ref),
-          transaction_id: response && (response.transaction_id || response.id),
-          status: response && response.status,
-          raw: response || null
-        });
-      },
-      onclose: function () {
-        post({ type: "fulus-flw-close", depositId: depositId, tx_ref: cfg.tx_ref });
-      }
-    }));
-  }
-  document.getElementById("pay").onclick = openCheckout;
-  // Auto-open once script is ready
-  if (typeof FlutterwaveCheckout === "function") openCheckout();
-  else {
-    var n = 0;
-    var t = setInterval(function () {
-      n += 1;
-      if (typeof FlutterwaveCheckout === "function") { clearInterval(t); openCheckout(); }
-      else if (n > 40) { clearInterval(t); showErr("Timed out loading Flutterwave."); }
-    }, 150);
-  }
-})();
-</script>
-</body></html>`;
   }
 
   private buildSimulateCheckoutHtml(opts: {
@@ -405,40 +300,66 @@ export class DepositsService {
     return `<!doctype html>
 <html><head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Simulate Flutterwave</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>Pay with card</title>
 <style>
-body{margin:0;font-family:system-ui,sans-serif;background:#0A0A0A;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-.card{background:#161616;border-radius:24px;padding:28px 22px;max-width:380px;width:100%}
-.badge{display:inline-flex;background:#1a1a2e;color:#a78bfa;font-size:11px;font-weight:600;padding:6px 10px;border-radius:999px;margin-bottom:16px}
+html,body{margin:0;min-height:100%;background:#0A0A0A;color:#fff;font-family:system-ui,-apple-system,sans-serif;-webkit-tap-highlight-color:transparent}
+.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+.card{background:#161616;border-radius:24px;padding:28px 22px;max-width:380px;width:100%;text-align:center}
 h1{font-size:22px;margin:0 0 8px}p{opacity:.65;font-size:13px;line-height:1.5;margin:0 0 18px}
-.row{display:flex;justify-content:space-between;font-size:13px;margin:8px 0}
-button{width:100%;border:0;border-radius:16px;background:#FFD60A;color:#0A0A0A;font-weight:700;font-size:15px;padding:16px;cursor:pointer;margin-top:12px}
+.row{display:flex;justify-content:space-between;font-size:13px;margin:8px 0;text-align:left}
+button{width:100%;border:0;border-radius:16px;background:#FFD60A;color:#0A0A0A;font-weight:700;font-size:15px;padding:16px;cursor:pointer;margin-top:16px;touch-action:manipulation;-webkit-appearance:none}
+button:active{opacity:.85}button:disabled{opacity:.5}
+.err{color:#f87171;font-size:12px;margin-top:12px;display:none}
 </style></head>
-<body><div class="card">
-<span class="badge">SIMULATED · Flutterwave</span>
+<body><div class="wrap"><div class="card">
 <h1>Pay with card</h1>
-<p>No Flutterwave keys configured — confirm to credit the NGN wallet as if checkout succeeded.</p>
+<p>Confirm to credit your NGN wallet. Card details are handled securely by our payment partner.</p>
 <div class="row"><span>Charge</span><strong>${opts.currency} ${opts.amount.toFixed(2)}</strong></div>
 <div class="row"><span>Wallet credit</span><strong>₦${opts.receiveAmount.toLocaleString()}</strong></div>
 <button type="button" id="pay">Confirm payment</button>
-</div>
+<p class="err" id="err"></p>
+</div></div>
 <script>
-document.getElementById('pay').onclick=function(){
-  var msg = {
-    type: 'fulus-flw-success',
-    depositId: ${JSON.stringify(opts.depositId)},
-    tx_ref: ${JSON.stringify(opts.txRef)},
-    status: 'successful',
-    simulated: true
-  };
-  try {
-    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-      window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+(function () {
+  var done = false;
+  var btn = document.getElementById("pay");
+  var err = document.getElementById("err");
+  function post(msg) {
+    var raw = JSON.stringify(msg);
+    try {
+      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+        window.ReactNativeWebView.postMessage(raw);
+        return true;
+      }
+    } catch (e) {}
+    try { if (window.parent) window.parent.postMessage(msg, "*"); } catch (e2) {}
+    return false;
+  }
+  function confirmPay(ev) {
+    if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+    if (done) return;
+    done = true;
+    btn.disabled = true;
+    btn.textContent = "Confirming…";
+    var ok = post({
+      type: "fulus-card-success",
+      depositId: ${JSON.stringify(opts.depositId)},
+      tx_ref: ${JSON.stringify(opts.txRef)},
+      status: "successful",
+      simulated: true
+    });
+    if (!ok && err) {
+      done = false;
+      btn.disabled = false;
+      btn.textContent = "Confirm payment";
+      err.style.display = "block";
+      err.textContent = "Could not reach the app. Close and try again.";
     }
-  } catch (e) {}
-  try { window.parent && window.parent.postMessage(msg, '*'); } catch (e2) {}
-};
+  }
+  btn.addEventListener("click", confirmPay, false);
+  btn.addEventListener("touchend", confirmPay, false);
+})();
 </script></body></html>`;
   }
 

@@ -46,10 +46,7 @@ export class DepositsController {
     return ok(res, await depositsService.verifyCardDeposit(req.user.id, query));
   };
 
-  /**
-   * Inline FlutterwaveCheckout HTML for the mobile/web WebView.
-   * Loads https://checkout.flutterwave.com/v3.js with FLUTTERWAVE_PUBLIC_KEY.
-   */
+  /** Simulate confirm page when hosted card checkout is not live. */
   inlineCheckout = async (req: Request, res: Response) => {
     const query = z
       .object({
@@ -61,10 +58,16 @@ export class DepositsController {
     res.status(200).type("html").send(html);
   };
 
-  /** Kept for older clients / deep links. */
+  /** Hosted checkout redirect target — notifies the in-app WebView to verify. */
   cardReturn = async (req: Request, res: Response) => {
     const depositId = typeof req.query.depositId === "string" ? req.query.depositId : "";
     const txRef = typeof req.query.tx_ref === "string" ? req.query.tx_ref : "";
+    const transactionId =
+      typeof req.query.transaction_id === "string"
+        ? req.query.transaction_id
+        : typeof req.query.transactionId === "string"
+          ? req.query.transactionId
+          : "";
     const status = typeof req.query.status === "string" ? req.query.status : "successful";
     res
       .status(200)
@@ -77,19 +80,23 @@ export class DepositsController {
 h1{font-size:20px;margin:0 0 8px}p{opacity:.7;font-size:14px;margin:0}</style></head>
 <body><div class="card" data-fulus-card-return="1" data-status="${status}" data-deposit-id="${depositId}" data-tx-ref="${txRef}">
 <h1>Payment complete</h1>
-<p>You can return to Fulus. This window will close automatically.</p>
+<p>Returning to Fulus…</p>
 </div>
 <script>
-try {
-  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-    window.ReactNativeWebView.postMessage(JSON.stringify({
-      type: "fulus-flw-success",
-      depositId: ${JSON.stringify(depositId)},
-      tx_ref: ${JSON.stringify(txRef)},
-      status: ${JSON.stringify(status)}
-    }));
-  }
-} catch (e) {}
+(function () {
+  var msg = {
+    type: "fulus-card-success",
+    depositId: ${JSON.stringify(depositId)},
+    tx_ref: ${JSON.stringify(txRef)},
+    transaction_id: ${JSON.stringify(transactionId)},
+    status: ${JSON.stringify(status)}
+  };
+  try {
+    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+      window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+    }
+  } catch (e) {}
+})();
 </script>
 </body></html>`);
   };
