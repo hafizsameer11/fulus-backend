@@ -61,8 +61,8 @@ apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));
 apiRouter.post("/deposits/card/initiate", requireAuth, asyncHandler(depositsController.initiateCard));
 apiRouter.get("/deposits/card/verify", requireAuth, asyncHandler(depositsController.verifyCard));
+apiRouter.get("/deposits/card/inline-checkout", asyncHandler(depositsController.inlineCheckout));
 apiRouter.get("/deposits/card/return", asyncHandler(depositsController.cardReturn));
-apiRouter.get("/deposits/card/simulate-checkout", asyncHandler(depositsController.simulateCheckout));
 apiRouter.post("/admin/deposits/:id/confirm", requireAdmin, asyncHandler(depositsController.confirm));
 
 apiRouter.get("/banks", requireAuth, asyncHandler(transfersController.banks));
