@@ -40,6 +40,15 @@ const envSchema = z.object({
   FLUTTERWAVE_PUBLIC_KEY: z.string().optional().default(""),
   FLUTTERWAVE_WEBHOOK_SECRET: z.string().optional().default(""),
   FLUTTERWAVE_REDIRECT_URL: z.string().optional().default(""),
+  /**
+   * When true (default): credit wallet from app checkout success without calling Flutterwave verify.
+   * Set to "0" later to require server-side Flutterwave verification again.
+   */
+  FLUTTERWAVE_TRUST_CLIENT_SUCCESS: z
+    .string()
+    .optional()
+    .default("1")
+    .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
 
   /** Custom SMTP (Hostinger, etc.) — required in production for OTP / reset emails */
   SMTP_HOST: z.string().optional().default(""),

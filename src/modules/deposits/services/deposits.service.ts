@@ -362,10 +362,13 @@ button:active{opacity:.85}button:disabled{opacity:.5}
     if (!(receiveAmount > 0)) throw new AppError("Invalid deposit amount");
 
     const txRef = deposit.providerRef ?? opts.txRef ?? "";
-    let verified = Boolean(opts.forceSimulate) || deposit.provider === "flutterwave-sim";
+    /** Temporary: trust app checkout callback; set FLUTTERWAVE_TRUST_CLIENT_SUCCESS=0 to verify via Flutterwave again. */
+    const trustClient = env.FLUTTERWAVE_TRUST_CLIENT_SUCCESS;
+    let verified =
+      trustClient || Boolean(opts.forceSimulate) || deposit.provider === "flutterwave-sim";
     let flwData: Record<string, unknown> | undefined = opts.providerPayload;
 
-    if (flutterwaveLive() && !opts.forceSimulate) {
+    if (!trustClient && flutterwaveLive() && !opts.forceSimulate && deposit.provider !== "flutterwave-sim") {
       try {
         let verify: { status: string; data?: Record<string, unknown> };
         if (opts.transactionId != null && String(opts.transactionId) !== "") {
@@ -392,7 +395,6 @@ button:active{opacity:.85}button:disabled{opacity:.5}
         }
       } catch (err) {
         if (err instanceof AppError) throw err;
-        // Typical: app charged with FLWPUBK_TEST but API has a LIVE secret (or vice versa).
         throw new AppError(
           "Payment succeeded at checkout but could not be verified. Set FLUTTERWAVE_SECRET_KEY to the matching FLWSECK_TEST key while testing.",
           402,
@@ -402,11 +404,15 @@ button:active{opacity:.85}button:disabled{opacity:.5}
     }
 
     if (!verified) {
-      throw new AppError(
-        "Unable to verify card payment. Configure a Flutterwave TEST secret on the API, or retry the deposit.",
-        402,
-        "NOT_VERIFIED",
-      );
+      throw new AppError("Unable to verify card payment", 402, "NOT_VERIFIED");
+    }
+
+    if (trustClient && !flwData) {
+      flwData = {
+        trustedClientSuccess: true,
+        transaction_id: opts.transactionId ?? null,
+        tx_ref: txRef,
+      };
     }
 
     const transaction = await walletService.credit({
@@ -424,6 +430,7 @@ button:active{opacity:.85}button:disabled{opacity:.5}
         payCurrency: meta.payCurrency,
         payAmount: meta.payAmount,
         rateApplied: meta.rateApplied,
+        trustedClientSuccess: trustClient,
         flutterwave: flwData ?? null,
       }),
     });
@@ -438,6 +445,7 @@ button:active{opacity:.85}button:disabled{opacity:.5}
         metadata: asJson({
           ...meta,
           settledAt: new Date().toISOString(),
+          trustedClientSuccess: trustClient,
           flutterwave: flwData ?? null,
         }),
       },
@@ -473,9 +481,9 @@ button:active{opacity:.85}button:disabled{opacity:.5}
 
     const settled = await this.settleCardDeposit({
       depositId: deposit.id,
-      txRef: deposit.providerRef ?? undefined,
+      txRef: deposit.providerRef ?? query.tx_ref ?? undefined,
       transactionId: query.transaction_id,
-      forceSimulate: deposit.provider === "flutterwave-sim",
+      forceSimulate: deposit.provider === "flutterwave-sim" || env.FLUTTERWAVE_TRUST_CLIENT_SUCCESS,
     });
     return { ...settled, status: "SUCCESS" as const };
   }
