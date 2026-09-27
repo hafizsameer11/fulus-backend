@@ -183,8 +183,8 @@ function moneyAmount(value: unknown): number {
 function extractTempBank(transfer: Record<string, unknown>) {
   const payIn = asRecord(transfer.pay_in);
   const details = asRecord(payIn.recipient_details);
-  const scrub = (v: string | null) => {
-    if (!v) return v;
+  const scrub = (v: string | null | undefined) => {
+    if (!v) return null;
     const cleaned = v
       .replace(/\bbusha\b/gi, "")
       .replace(/\s{2,}/g, " ")
