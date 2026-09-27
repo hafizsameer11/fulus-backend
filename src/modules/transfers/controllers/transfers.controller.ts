@@ -10,7 +10,7 @@ import {
 } from "../services/transfers.service.js";
 
 export class TransfersController {
-  banks = async (_req: Request, res: Response) => ok(res, transfersService.listBanks());
+  banks = async (_req: Request, res: Response) => ok(res, await transfersService.listBanks());
 
   lookup = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();

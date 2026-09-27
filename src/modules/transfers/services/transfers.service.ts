@@ -63,8 +63,38 @@ const NG_BANKS = [
   { code: "50823", name: "PalmPay" },
 ];
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function asList(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const obj = asRecord(value);
+  if (Array.isArray(obj.data)) return obj.data;
+  if (Array.isArray(obj.banks)) return obj.banks;
+  return [];
+}
+
 export class TransfersService {
-  listBanks() {
+  async listBanks() {
+    if (useBushaLive()) {
+      try {
+        const { bushaClient } = await import("../../../providers/busha/client.js");
+        const raw = await bushaClient.listBanks({ currency: "NGN", country: "NG" });
+        const rows = asList(raw)
+          .map((row) => {
+            const b = asRecord(row);
+            const code = String(b.code ?? b.bank_code ?? b.id ?? "").trim();
+            const name = String(b.name ?? b.bank_name ?? "").trim();
+            if (!code || !name) return null;
+            return { code, name };
+          })
+          .filter((b): b is { code: string; name: string } => Boolean(b));
+        if (rows.length > 0) return rows;
+      } catch {
+        // Fall through to static list
+      }
+    }
     return NG_BANKS;
   }
 
@@ -84,16 +114,65 @@ export class TransfersService {
   }
 
   async resolveAccount(input: z.infer<typeof resolveSchema>) {
-    // No live bank name enquiry yet — always return an in-system mock resolve.
-    const bank = NG_BANKS.find((b) => b.code === input.bankCode);
+    const fallbackBank = NG_BANKS.find((b) => b.code === input.bankCode);
+
+    if (useBushaLive()) {
+      try {
+        const { bushaClient } = await import("../../../providers/busha/client.js");
+        let raw: unknown;
+        try {
+          raw = await bushaClient.resolveBankAccount({
+            bank_code: input.bankCode,
+            account_number: input.accountNumber,
+            channel: "bank",
+          });
+        } catch {
+          // Docs sample uses channel mobile_money for this endpoint.
+          raw = await bushaClient.resolveBankAccount({
+            bank_code: input.bankCode,
+            account_number: input.accountNumber,
+            channel: "mobile_money",
+          });
+        }
+        const data = asRecord(asRecord(raw).data ?? raw);
+        const accountName = String(
+          data.account_name ?? data.accountName ?? data.name ?? "",
+        ).trim();
+        if (!accountName) {
+          throw new AppError("Could not resolve account name", 400, "RESOLVE_FAILED");
+        }
+        return {
+          provider: "busha",
+          live: true,
+          data: {
+            account_number: String(data.account_number ?? input.accountNumber),
+            account_name: accountName,
+            bank_code: String(data.bank_code ?? input.bankCode),
+            bank_name: String(data.bank_name ?? fallbackBank?.name ?? "Bank"),
+          },
+        };
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        throw new AppError(
+          sanitizePublicCopy(
+            err instanceof Error ? err.message : "Could not resolve bank account",
+            "Could not resolve bank account",
+          ),
+          400,
+          "RESOLVE_FAILED",
+        );
+      }
+    }
+
     const last4 = input.accountNumber.slice(-4);
     return {
       provider: "mock",
+      live: false,
       data: {
         account_number: input.accountNumber,
         account_name: `FULUS MOCK / ${last4}`,
         bank_code: input.bankCode,
-        bank_name: bank?.name ?? "Unknown Bank",
+        bank_name: fallbackBank?.name ?? "Unknown Bank",
         mock: true,
       },
     };
@@ -340,7 +419,11 @@ export class TransfersService {
         where: { id: debit.transaction.id },
         data: { status: "FAILED" },
       });
-      throw error;
+      const message = sanitizePublicCopy(
+        error instanceof Error ? error.message : "Bank payout failed",
+        "Bank payout could not be started",
+      );
+      throw new AppError(message, 502, "PAYOUT_FAILED");
     }
   }
 

@@ -147,6 +147,38 @@ export class BushaClient {
     });
   }
 
+  /** Nigerian (and other) bank list for payouts — GET /v1/banks */
+  listBanks(query?: { currency?: string; country?: string }) {
+    return this.request("/v1/banks", {
+      profileId: null,
+      query: {
+        currency: query?.currency,
+        country: query?.country,
+      },
+    });
+  }
+
+  /** Name enquiry before creating an ngn_bank recipient. */
+  resolveBankAccount(body: {
+    currency_id?: string;
+    country_id?: string;
+    channel?: string;
+    bank_code: string;
+    account_number: string;
+  }) {
+    return this.request("/v1/recipients/resolve-bank-account", {
+      method: "POST",
+      profileId: null,
+      body: {
+        currency_id: body.currency_id ?? "NGN",
+        country_id: body.country_id ?? "NG",
+        channel: body.channel ?? "bank",
+        bank_code: body.bank_code,
+        account_number: body.account_number,
+      },
+    });
+  }
+
   createRecipient(body: Record<string, unknown>, profileId?: BushaProfileScope) {
     return this.request("/v1/recipients", { method: "POST", body, profileId: profileId ?? null });
   }
