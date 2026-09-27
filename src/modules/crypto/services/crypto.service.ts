@@ -183,10 +183,19 @@ function moneyAmount(value: unknown): number {
 function extractTempBank(transfer: Record<string, unknown>) {
   const payIn = asRecord(transfer.pay_in);
   const details = asRecord(payIn.recipient_details);
+  const scrub = (v: string | null) => {
+    if (!v) return v;
+    const cleaned = v
+      .replace(/\bbusha\b/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/^[\s/·\-–—]+|[\s/·\-–—]+$/g, "")
+      .trim();
+    return cleaned || null;
+  };
   return {
-    accountName: strOf(details, ["account_name", "accountName"]) ?? "",
+    accountName: scrub(strOf(details, ["account_name", "accountName"])) ?? "Fulus",
     accountNumber: strOf(details, ["account_number", "accountNumber"]) ?? "",
-    bankName: strOf(details, ["bank_name", "bankName"]) ?? "",
+    bankName: scrub(strOf(details, ["bank_name", "bankName"])) ?? "Partner Bank",
     bankCode: strOf(details, ["bank_code", "bankCode"]) ?? null,
     email: strOf(details, ["email"]) ?? null,
     expiresAt: strOf(payIn, ["expires_at", "expiresAt"]) ?? strOf(transfer, ["expires_at"]) ?? null,
@@ -973,7 +982,7 @@ export class CryptoService {
         currency: creditCurrency,
         amount: receiveAmount,
         type: "CRYPTO_BUY",
-        description: `Buy ${creditCurrency} (simulated master float)`,
+        description: `Buy ${creditCurrency} (simulated)`,
         provider: "simulated",
         providerRef: `${providerRef}_credit`,
         metadata: asJson({ orderId: order.id, simulated: true }),

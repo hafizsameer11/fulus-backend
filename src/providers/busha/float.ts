@@ -51,13 +51,24 @@ export type MasterPayoutResult = {
   simulated: boolean;
 };
 
+/** Never surface vendor brand names in bank details shown to users. */
+function scrubVendorBrand(value: string | undefined): string | undefined {
+  if (!value) return value;
+  const cleaned = value
+    .replace(/\bbusha\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[\s/·\-–—]+|[\s/·\-–—]+$/g, "")
+    .trim();
+  return cleaned || undefined;
+}
+
 function extractBank(transfer: Record<string, unknown>): TempBankDetails {
   const payIn = asRecord(transfer.pay_in);
   const details = asRecord(payIn.recipient_details);
   return {
-    accountName: str(details.account_name) ?? str(details.accountName) ?? "Fulus",
+    accountName: scrubVendorBrand(str(details.account_name) ?? str(details.accountName)) ?? "Fulus",
     accountNumber: str(details.account_number) ?? str(details.accountNumber) ?? "",
-    bankName: str(details.bank_name) ?? str(details.bankName) ?? "Partner Bank",
+    bankName: scrubVendorBrand(str(details.bank_name) ?? str(details.bankName)) ?? "Partner Bank",
     bankCode: str(details.bank_code) ?? str(details.bankCode),
     expiresAt: str(payIn.expires_at) ?? str(payIn.expiresAt),
   };
