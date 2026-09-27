@@ -35,6 +35,10 @@ export function hasEsimGoKeys() {
   return Boolean(env.ESIM_GO_API_KEY);
 }
 
+export function hasFlutterwaveKeys() {
+  return Boolean(env.FLUTTERWAVE_SECRET_KEY);
+}
+
 export function usePagocardsLive() {
   return hasPagocardsKeys() && !simulateProviders();
 }
@@ -53,6 +57,10 @@ export function useStrowalletLive() {
 
 export function useEsimGoLive() {
   return hasEsimGoKeys() && !simulateProviders();
+}
+
+export function useFlutterwaveLive() {
+  return hasFlutterwaveKeys() && !simulateProviders();
 }
 
 export function simRef(prefix: string) {

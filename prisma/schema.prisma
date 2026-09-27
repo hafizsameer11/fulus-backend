@@ -110,6 +110,7 @@ enum DepositMethod {
   BANK_TRANSFER
   VIRTUAL_ACCOUNT
   CRYPTO
+  CARD
   MANUAL
 }
 

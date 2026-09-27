@@ -33,6 +33,13 @@ export class WebhooksController {
     const event = await webhooksService.handleStrowallet(req.body);
     return ok(res, { id: event.id, processed: true });
   };
+
+  flutterwave = async (req: Request, res: Response) => {
+    const verifHash =
+      req.header("verif-hash") ?? req.header("Verif-Hash") ?? undefined;
+    const event = await webhooksService.handleFlutterwave(req.body, verifHash);
+    return ok(res, { id: event.id, processed: true });
+  };
 }
 
 export const webhooksController = new WebhooksController();

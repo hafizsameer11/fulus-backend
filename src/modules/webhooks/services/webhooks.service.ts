@@ -681,6 +681,46 @@ export class WebhooksService {
     }
   }
 
+  async handleFlutterwave(payload: unknown, verifHash?: string) {
+    const { flutterwaveClient } = await import("../../../providers/flutterwave/client.js");
+    if (!flutterwaveClient.verifyWebhookSignature(verifHash)) {
+      throw new AppError("Invalid Flutterwave webhook signature", 401, "INVALID_SIGNATURE");
+    }
+
+    const p = asRecord(payload);
+    const eventType = str(p.event) ?? this.eventType(payload) ?? "flutterwave.event";
+    const event = await this.ingest("flutterwave", payload, { "verif-hash": verifHash }, eventType);
+
+    try {
+      const data = asRecord(p.data);
+      const status = String(data.status ?? "").toLowerCase();
+      const txRef = str(data.tx_ref) ?? str(data.txRef);
+      if (
+        (eventType === "charge.completed" || eventType.includes("charge")) &&
+        (status === "successful" || status === "success") &&
+        txRef
+      ) {
+        const { depositsService } = await import("../../deposits/services/deposits.service.js");
+        await depositsService.settleCardDeposit({
+          txRef,
+          providerPayload: data,
+        });
+      }
+
+      return prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: true, error: null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Flutterwave webhook processing failed";
+      await prisma.webhookEvent.update({
+        where: { id: event.id },
+        data: { processed: false, error: message },
+      });
+      throw error;
+    }
+  }
+
   private eventType(payload: unknown) {
     if (!payload || typeof payload !== "object") return undefined;
     const p = payload as Record<string, unknown>;

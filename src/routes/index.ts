@@ -25,7 +25,7 @@ apiRouter.get("/health", (_req, res) => {
       service: "fulus-api",
       status: "ok",
       simulateProviders: simulateProviders(),
-      providers: ["pagocards", "busha", "prembly", "strowallet", "esim-go"],
+      providers: ["pagocards", "busha", "prembly", "strowallet", "esim-go", "flutterwave"],
     },
   });
 });
@@ -59,6 +59,10 @@ apiRouter.put("/admin/fx/rates", requireAdmin, asyncHandler(fxController.adminUp
 
 apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));
+apiRouter.post("/deposits/card/initiate", requireAuth, asyncHandler(depositsController.initiateCard));
+apiRouter.get("/deposits/card/verify", requireAuth, asyncHandler(depositsController.verifyCard));
+apiRouter.get("/deposits/card/return", asyncHandler(depositsController.cardReturn));
+apiRouter.get("/deposits/card/simulate-checkout", asyncHandler(depositsController.simulateCheckout));
 apiRouter.post("/admin/deposits/:id/confirm", requireAdmin, asyncHandler(depositsController.confirm));
 
 apiRouter.get("/banks", requireAuth, asyncHandler(transfersController.banks));
@@ -123,3 +127,4 @@ apiRouter.post("/webhooks/esim-go", asyncHandler(webhooksController.esimGo));
 apiRouter.post("/webhooks/busha", asyncHandler(webhooksController.busha));
 apiRouter.post("/webhooks/pagocards", asyncHandler(webhooksController.pagocards));
 apiRouter.post("/webhooks/strowallet", asyncHandler(webhooksController.strowallet));
+apiRouter.post("/webhooks/flutterwave", asyncHandler(webhooksController.flutterwave));
