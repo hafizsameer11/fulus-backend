@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { created, ok } from "../../../lib/http.js";
 import { UnauthorizedError } from "../../../lib/errors.js";
 import {
+  bankQuoteSchema,
   bankTransferSchema,
   beneficiarySchema,
   fulusTransferSchema,
@@ -44,6 +45,11 @@ export class TransfersController {
       idempotencyKey: req.header("Idempotency-Key") ?? req.body.idempotencyKey,
     });
     return created(res, await transfersService.transferFulus(req.user.id, input));
+  };
+
+  bankQuote = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await transfersService.quoteBankTransfer(req.user.id, bankQuoteSchema.parse(req.body)));
   };
 
   bank = async (req: Request, res: Response) => {

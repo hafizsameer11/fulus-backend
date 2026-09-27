@@ -35,10 +35,14 @@ export const fulusTransferSchema = z.object({
   idempotencyKey: z.string().optional(),
 });
 
-export const MIN_BANK_PAYOUT_NGN = 500;
+/** What the beneficiary must receive (Busha net minimum is ₦499). */
+export const MIN_BANK_RECEIVE_NGN = 499;
 
 export const bankTransferSchema = z.object({
-  amount: z.number().min(MIN_BANK_PAYOUT_NGN, `Minimum bank payout is ₦${MIN_BANK_PAYOUT_NGN}`),
+  /** Amount the bank recipient receives (not including payout fee). */
+  amount: z
+    .number()
+    .min(MIN_BANK_RECEIVE_NGN, `Minimum bank payout is ₦${MIN_BANK_RECEIVE_NGN} (plus fees). Try at least ₦610.`),
   accountNumber: z.string().min(10),
   accountName: z.string().min(2),
   bankCode: z.string().min(2),
@@ -47,6 +51,14 @@ export const bankTransferSchema = z.object({
   beneficiaryId: z.string().optional(),
   saveBeneficiary: z.boolean().optional(),
   idempotencyKey: z.string().optional(),
+});
+
+export const bankQuoteSchema = z.object({
+  amount: z.number().positive(),
+  accountNumber: z.string().min(10),
+  accountName: z.string().min(2).optional(),
+  bankCode: z.string().min(2),
+  bankName: z.string().optional(),
 });
 
 const NG_BANKS = [
@@ -263,6 +275,46 @@ export class TransfersService {
     });
   }
 
+  /**
+   * Preview fee/debit for a bank payout. `amount` = what the recipient should receive.
+   */
+  async quoteBankTransfer(userId: string, input: z.infer<typeof bankQuoteSchema>) {
+    const receiveAmount = Number(input.amount);
+    if (receiveAmount + 1e-9 < MIN_BANK_RECEIVE_NGN) {
+      throw new AppError(
+        `Minimum bank payout is ₦${MIN_BANK_RECEIVE_NGN} (plus fees). Try at least ₦610.`,
+        400,
+        "MIN_PAYOUT",
+      );
+    }
+
+    const bankName = input.bankName || NG_BANKS.find((b) => b.code === input.bankCode)?.name || "Bank";
+    const { bushaFloatService } = await import("../../../providers/busha/float.js");
+    const quote = await bushaFloatService.quoteMasterBankPayout({
+      targetAmount: receiveAmount,
+      accountName: input.accountName || "Beneficiary",
+      accountNumber: input.accountNumber,
+      bankName,
+      bankCode: input.bankCode,
+    });
+
+    const wallet = await prisma.wallet.findUnique({
+      where: { userId_currency: { userId, currency: "NGN" } },
+    });
+    const available = Number(wallet?.available ?? 0);
+
+    return {
+      receiveAmount: quote.targetAmount,
+      feeAmount: quote.feeAmount,
+      debitAmount: quote.sourceAmount,
+      minReceive: MIN_BANK_RECEIVE_NGN,
+      sufficient: available + 1e-9 >= quote.sourceAmount,
+      available,
+      live: useBushaLive(),
+      simulated: quote.simulated,
+    };
+  }
+
   async transferBank(userId: string, input: z.infer<typeof bankTransferSchema>) {
     if (input.idempotencyKey) {
       const existing = await prisma.transaction.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
@@ -272,19 +324,35 @@ export class TransfersService {
       }
     }
 
-    const amount = new Prisma.Decimal(input.amount);
-    const fee = new Prisma.Decimal(0);
-    const total = amount.plus(fee);
+    const receiveAmount = Number(input.amount);
     const live = useBushaLive();
+    const bankName = input.bankName || NG_BANKS.find((b) => b.code === input.bankCode)?.name || "Bank";
 
-    // Debit Fulus ledger first (remaining balance only).
+    // Quote first so we know Busha source (debit) + fee — amount is what the bank receives.
+    const { bushaFloatService } = await import("../../../providers/busha/float.js");
+    const quote = await bushaFloatService.quoteMasterBankPayout({
+      targetAmount: receiveAmount,
+      accountName: input.accountName,
+      accountNumber: input.accountNumber,
+      bankName,
+      bankCode: input.bankCode,
+    });
+
+    const debitAmount = new Prisma.Decimal(quote.sourceAmount);
+    const fee = new Prisma.Decimal(quote.feeAmount);
+    const receive = new Prisma.Decimal(quote.targetAmount);
+
     const debit = await prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findUnique({
         where: { userId_currency: { userId, currency: "NGN" } },
       });
       if (!wallet) throw new NotFoundError("NGN wallet not found");
-      if (new Prisma.Decimal(wallet.available).lt(total)) {
-        throw new AppError("Insufficient balance", 400, "INSUFFICIENT_FUNDS");
+      if (new Prisma.Decimal(wallet.available).lt(debitAmount)) {
+        throw new AppError(
+          `Insufficient balance. You need ₦${quote.sourceAmount.toLocaleString()} (recipient ₦${quote.targetAmount.toLocaleString()} + fee ₦${quote.feeAmount.toLocaleString()}).`,
+          400,
+          "INSUFFICIENT_FUNDS",
+        );
       }
 
       let beneficiaryId = input.beneficiaryId;
@@ -304,13 +372,13 @@ export class TransfersService {
         beneficiaryId = b.id;
       }
 
-      const balanceAfter = new Prisma.Decimal(wallet.available).minus(total);
+      const balanceAfter = new Prisma.Decimal(wallet.available).minus(debitAmount);
       const transaction = await tx.transaction.create({
         data: {
           userId,
           type: "WITHDRAWAL",
           status: live ? "PENDING" : "SUCCESS",
-          amount,
+          amount: receive,
           fee,
           currency: "NGN",
           reference: makeReference("BNK"),
@@ -324,6 +392,10 @@ export class TransfersService {
             bankCode: input.bankCode,
             bankName: input.bankName,
             masterFloatPayout: live,
+            receiveAmount: quote.targetAmount,
+            debitAmount: quote.sourceAmount,
+            feeAmount: quote.feeAmount,
+            quoteId: quote.quoteId,
           },
         },
       });
@@ -334,7 +406,7 @@ export class TransfersService {
           walletId: wallet.id,
           transactionId: transaction.id,
           type: "DEBIT",
-          amount: total,
+          amount: debitAmount,
           balanceAfter,
         },
       });
@@ -345,7 +417,7 @@ export class TransfersService {
           transactionId: transaction.id,
           beneficiaryId,
           currency: "NGN",
-          amount,
+          amount: receive,
           fee,
           accountName: input.accountName,
           accountNumber: input.accountNumber,
@@ -360,40 +432,45 @@ export class TransfersService {
       return { transaction, transfer, beneficiaryId };
     });
 
-    if (!live) {
-      return { ...debit, mock: true };
+    if (!live || quote.simulated) {
+      return {
+        ...debit,
+        mock: !live,
+        live: false,
+        receiveAmount: quote.targetAmount,
+        feeAmount: quote.feeAmount,
+        debitAmount: quote.sourceAmount,
+      };
     }
 
     try {
-      const { bushaFloatService } = await import("../../../providers/busha/float.js");
-      const payout = await bushaFloatService.payoutFromMaster({
-        amount: Number(input.amount),
-        accountName: input.accountName,
-        accountNumber: input.accountNumber,
-        bankName: input.bankName || NG_BANKS.find((b) => b.code === input.bankCode)?.name || "Bank",
-        bankCode: input.bankCode,
-      });
+      const { transferId } = await bushaFloatService.executeQuotedPayout(quote.quoteId);
 
       await prisma.bankTransfer.update({
         where: { id: debit.transfer.id },
         data: {
-          providerRef: payout.transferId,
-          status: payout.simulated ? "SUCCESS" : "PENDING",
+          providerRef: transferId,
+          status: "PENDING",
+          fee,
         },
       });
       await prisma.transaction.update({
         where: { id: debit.transaction.id },
         data: {
-          providerRef: payout.transferId,
-          status: payout.simulated ? "SUCCESS" : "PENDING",
+          providerRef: transferId,
+          status: "PENDING",
+          fee,
           metadata: {
             ...(typeof debit.transaction.metadata === "object" && debit.transaction.metadata
               ? (debit.transaction.metadata as object)
               : {}),
             masterPayout: {
-              transferId: payout.transferId,
-              recipientId: payout.recipientId,
-              quoteId: payout.quoteId,
+              transferId,
+              recipientId: quote.recipientId,
+              quoteId: quote.quoteId,
+              sourceAmount: quote.sourceAmount,
+              targetAmount: quote.targetAmount,
+              feeAmount: quote.feeAmount,
             },
           },
         },
@@ -401,13 +478,20 @@ export class TransfersService {
 
       const transfer = await prisma.bankTransfer.findUniqueOrThrow({ where: { id: debit.transfer.id } });
       const transaction = await prisma.transaction.findUniqueOrThrow({ where: { id: debit.transaction.id } });
-      return { transaction, transfer, mock: false, live: true };
+      return {
+        transaction,
+        transfer,
+        mock: false,
+        live: true,
+        receiveAmount: quote.targetAmount,
+        feeAmount: quote.feeAmount,
+        debitAmount: quote.sourceAmount,
+      };
     } catch (error) {
-      // Refund Fulus ledger if Busha payout could not start.
       await walletService.credit({
         userId,
         currency: "NGN",
-        amount: Number(input.amount),
+        amount: quote.sourceAmount,
         type: "ADJUSTMENT",
         description: `Refund failed bank withdrawal ${debit.transaction.reference}`,
         provider: "busha",
@@ -421,11 +505,9 @@ export class TransfersService {
         where: { id: debit.transaction.id },
         data: { status: "FAILED" },
       });
-      const message = sanitizePublicCopy(
-        error instanceof Error ? error.message : "Bank payout failed",
-        "Bank payout could not be started",
-      );
-      throw new AppError(message, 502, "PAYOUT_FAILED");
+
+      const { mapBushaPayoutError } = await import("../../../providers/busha/float.js");
+      throw mapBushaPayoutError(error, receiveAmount);
     }
   }
 

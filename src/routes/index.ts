@@ -91,6 +91,7 @@ apiRouter.post("/beneficiaries", requireAuth, asyncHandler(transfersController.c
 apiRouter.delete("/beneficiaries/:id", requireAuth, asyncHandler(transfersController.deleteBeneficiary));
 apiRouter.post("/transfers/resolve", requireAuth, asyncHandler(transfersController.resolve));
 apiRouter.post("/transfers/fulus", requireAuth, asyncHandler(transfersController.fulus));
+apiRouter.post("/transfers/bank/quote", requireAuth, asyncHandler(transfersController.bankQuote));
 apiRouter.post("/transfers/bank", requireAuth, asyncHandler(transfersController.bank));
 
 apiRouter.get("/kyc/checks", requireAuth, asyncHandler(kycController.list));
