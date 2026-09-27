@@ -4,13 +4,18 @@ import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { esimGoClient } from "../../../providers/esim-go/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
+import { fxService } from "../../fx/services/fx.service.js";
 import { simIccid, simRef, useEsimGoLive } from "../../../lib/simulate.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
 
+const PAY_CURRENCY = z.enum(["USD", "NGN", "SAR"]);
+
 export const purchaseSchema = z.object({
   bundleName: z.string().min(1),
+  /** List price in USD (catalogue currency). */
   amount: z.number().positive(),
-  currency: z.enum(["NGN", "USD"]).default("USD"),
+  /** Wallet to debit — converted from USD when not USD. */
+  currency: PAY_CURRENCY.default("USD"),
   label: z.string().optional(),
   quantity: z.number().int().positive().default(1),
 });
@@ -18,7 +23,7 @@ export const purchaseSchema = z.object({
 export const topupSchema = z.object({
   bundleName: z.string().min(1),
   amount: z.number().positive(),
-  currency: z.enum(["NGN", "USD"]).default("USD"),
+  currency: PAY_CURRENCY.default("USD"),
   dataMb: z.number().int().positive().optional(),
 });
 
@@ -26,6 +31,32 @@ export const patchEsimSchema = z.object({
   label: z.string().min(1).max(60).optional(),
   status: z.enum(["ORDERED", "READY", "INSTALLED", "DEPLETED", "EXPIRED", "FAILED"]).optional(),
 });
+
+/** Convert USD catalogue charge into the user's chosen pay wallet. */
+async function resolveEsimDebit(userId: string, usdAmount: number, payCurrency: "USD" | "NGN" | "SAR") {
+  if (!(usdAmount > 0)) throw new AppError("Invalid eSIM amount");
+  if (payCurrency === "USD") {
+    return { debitCurrency: "USD" as const, debitAmount: usdAmount, fx: null as null | Record<string, unknown> };
+  }
+  const quote = await fxService.quote(userId, {
+    fromCurrency: "USD",
+    toCurrency: payCurrency,
+    amount: usdAmount,
+  });
+  const debitAmount = Math.round(quote.toAmount * 100) / 100;
+  if (!(debitAmount > 0)) throw new AppError("Could not price eSIM in that currency");
+  return {
+    debitCurrency: payCurrency,
+    debitAmount,
+    fx: {
+      fromCurrency: "USD",
+      toCurrency: payCurrency,
+      fromAmount: usdAmount,
+      toAmount: debitAmount,
+      rateApplied: quote.rateApplied,
+    },
+  };
+}
 
 /** Normalized catalogue row shared by live + simulated modes (matches eSIM Go fields). */
 export type CatalogueCountry = {
@@ -700,14 +731,14 @@ export class EsimService {
 
   async purchase(userId: string, input: z.infer<typeof purchaseSchema>) {
     const catalogBundle = await this.resolveBundle(input.bundleName);
-    let chargeAmount = pickChargeAmount(catalogBundle?.price, input.amount);
+    let usdAmount = pickChargeAmount(catalogBundle?.price, input.amount);
 
     if (useEsimGoLive()) {
       const validation = (await esimGoClient.validateOrder({
         item: input.bundleName,
         quantity: input.quantity,
       })) as Record<string, unknown>;
-      chargeAmount = pickChargeAmount(validation.total ?? validation.price, chargeAmount);
+      usdAmount = pickChargeAmount(validation.total ?? validation.price, usdAmount);
     }
 
     const dataMb = catalogBundle?.unlimited
@@ -717,13 +748,20 @@ export class EsimService {
         : 1024;
     const days = catalogBundle?.days && catalogBundle.days > 0 ? catalogBundle.days : 7;
 
+    const pay = await resolveEsimDebit(userId, usdAmount, input.currency);
     const walletTx = await walletService.debit({
       userId,
-      currency: input.currency,
-      amount: chargeAmount,
+      currency: pay.debitCurrency,
+      amount: pay.debitAmount,
       type: "ESIM_PURCHASE",
       description: `eSIM ${input.bundleName}`,
       provider: useEsimGoLive() ? "esim-go" : "simulated",
+      metadata: {
+        kind: "esim_purchase",
+        usdAmount,
+        payCurrency: pay.debitCurrency,
+        fx: pay.fx,
+      } as Prisma.InputJsonValue,
     });
 
     try {
@@ -749,6 +787,8 @@ export class EsimService {
               catalogue: catalogBundle,
               matchingId,
               smdpAddress,
+              usdAmount,
+              pay: { currency: pay.debitCurrency, amount: pay.debitAmount, fx: pay.fx },
             }),
             orders: {
               create: {
@@ -816,6 +856,8 @@ export class EsimService {
             matchingId: install?.matchingId,
             smdpAddress: install?.smdpAddress,
             orderReference,
+            usdAmount,
+            pay: { currency: pay.debitCurrency, amount: pay.debitAmount, fx: pay.fx },
           }),
           orders: {
             create: {
@@ -845,8 +887,8 @@ export class EsimService {
     } catch (error) {
       await walletService.credit({
         userId,
-        currency: input.currency,
-        amount: chargeAmount,
+        currency: pay.debitCurrency,
+        amount: pay.debitAmount,
         type: "ADJUSTMENT",
         description: `Refund failed eSIM ${walletTx.reference}`,
         provider: "esim-go",
@@ -910,7 +952,7 @@ export class EsimService {
   async topup(userId: string, id: string, input: z.infer<typeof topupSchema>) {
     const esim = await this.get(userId, id);
     const catalogBundle = await this.resolveBundle(input.bundleName);
-    let chargeAmount = pickChargeAmount(catalogBundle?.price, input.amount);
+    let usdAmount = pickChargeAmount(catalogBundle?.price, input.amount);
     const addMb =
       input.dataMb ??
       (catalogBundle?.unlimited ? 0 : catalogBundle?.dataMb && catalogBundle.dataMb > 0 ? catalogBundle.dataMb : 1024);
@@ -922,16 +964,23 @@ export class EsimService {
         item: input.bundleName,
         quantity: 1,
       })) as Record<string, unknown>;
-      chargeAmount = pickChargeAmount(validation.total ?? validation.price, chargeAmount);
+      usdAmount = pickChargeAmount(validation.total ?? validation.price, usdAmount);
     }
 
+    const pay = await resolveEsimDebit(userId, usdAmount, input.currency);
     const walletTx = await walletService.debit({
       userId,
-      currency: input.currency,
-      amount: chargeAmount,
+      currency: pay.debitCurrency,
+      amount: pay.debitAmount,
       type: "ESIM_PURCHASE",
       description: `eSIM topup ${input.bundleName}`,
       provider: useEsimGoLive() ? "esim-go" : "simulated",
+      metadata: {
+        kind: "esim_topup",
+        usdAmount,
+        payCurrency: pay.debitCurrency,
+        fx: pay.fx,
+      } as Prisma.InputJsonValue,
     });
 
     try {
@@ -939,6 +988,8 @@ export class EsimService {
         simulated: !useEsimGoLive(),
         topupMb: addMb,
         catalogue: catalogBundle,
+        usdAmount,
+        pay: { currency: pay.debitCurrency, amount: pay.debitAmount, fx: pay.fx },
       };
 
       if (useEsimGoLive() && esim.iccid) {
@@ -977,12 +1028,19 @@ export class EsimService {
         include: { orders: true },
       });
 
-      return { esim: updated, transaction: walletTx };
+      await createInboxMessage({
+        userId,
+        title: "eSIM topped up",
+        body: `${updated.label ?? "Your eSIM"} was topped up successfully.`,
+        category: "esim",
+      });
+
+      return updated;
     } catch (error) {
       await walletService.credit({
         userId,
-        currency: input.currency,
-        amount: chargeAmount,
+        currency: pay.debitCurrency,
+        amount: pay.debitAmount,
         type: "ADJUSTMENT",
         description: `Refund failed eSIM topup ${walletTx.reference}`,
         provider: "esim-go",
