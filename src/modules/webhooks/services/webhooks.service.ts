@@ -256,11 +256,13 @@ export class WebhooksService {
     }
 
     // Bank withdrawals initiated from Fulus (master payout).
+    // funds_refunded = Busha cancelled after debiting master and returned NGN to float.
     if (
       eventType === "transfer.funds_delivered" ||
       eventType === "transfer.completed" ||
       eventType === "transfer.failed" ||
-      eventType === "transfer.cancelled"
+      eventType === "transfer.cancelled" ||
+      eventType === "transfer.funds_refunded"
     ) {
       const bankTx = await prisma.bankTransfer.findFirst({
         where: { providerRef },
@@ -268,7 +270,10 @@ export class WebhooksService {
       if (bankTx) {
         const ok =
           eventType === "transfer.completed" || eventType === "transfer.funds_delivered";
-        const failed = eventType === "transfer.failed" || eventType === "transfer.cancelled";
+        const failed =
+          eventType === "transfer.failed" ||
+          eventType === "transfer.cancelled" ||
+          eventType === "transfer.funds_refunded";
         if (ok && bankTx.status !== "SUCCESS") {
           await prisma.bankTransfer.update({
             where: { id: bankTx.id },
@@ -283,7 +288,13 @@ export class WebhooksService {
         } else if (failed && bankTx.status !== "FAILED") {
           await prisma.bankTransfer.update({
             where: { id: bankTx.id },
-            data: { status: "FAILED" },
+            data: {
+              status: "FAILED",
+              failureReason:
+                eventType === "transfer.funds_refunded"
+                  ? "Refunded by payment provider"
+                  : bankTx.failureReason,
+            },
           });
           if (bankTx.transactionId) {
             const tx = await prisma.transaction.findUnique({ where: { id: bankTx.transactionId } });
@@ -292,15 +303,29 @@ export class WebhooksService {
                 where: { id: tx.id },
                 data: { status: "FAILED" },
               });
-              await walletService.credit({
-                userId: bankTx.userId,
-                currency: "NGN",
-                amount: Number(bankTx.amount),
-                type: "ADJUSTMENT",
-                description: `Refund failed bank withdrawal ${tx.reference}`,
-                provider: "busha",
-                providerRef: `${providerRef}_refund`,
+              const meta = asRecord(tx.metadata);
+              // User was debited source (receive + Busha fee), not just receive amount.
+              const refundAmount =
+                num(meta.debitAmount) ??
+                Number(bankTx.amount) + Number(bankTx.fee ?? 0);
+              const alreadyRefund = await prisma.transaction.findFirst({
+                where: {
+                  userId: bankTx.userId,
+                  providerRef: `${providerRef}_refund`,
+                  type: "ADJUSTMENT",
+                },
               });
+              if (!alreadyRefund && refundAmount > 0) {
+                await walletService.credit({
+                  userId: bankTx.userId,
+                  currency: "NGN",
+                  amount: refundAmount,
+                  type: "ADJUSTMENT",
+                  description: `Refund failed bank withdrawal ${tx.reference}`,
+                  provider: "busha",
+                  providerRef: `${providerRef}_refund`,
+                });
+              }
             }
           }
         }
