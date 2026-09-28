@@ -109,7 +109,7 @@ function toPublicCard(card: NonNullable<CardRow>) {
 
 export class CardsService {
   /**
-   * 493-BIN create responses often omit PAN/CVV; Pagocards fills them on GET.
+   * 404-BIN create responses may omit PAN/CVV; Pagocards fills them on GET.
    * @see https://pagocards.com/documentation — Get Card
    */
   private async syncProviderDetails(
@@ -334,7 +334,7 @@ export class CardsService {
           const last4 = simLast4();
           const providerCardId = simRef("CARD");
           const now = new Date();
-          const pan = `49372410${String(10000000 + Number(last4)).slice(-8)}`;
+          const pan = `40472410${String(10000000 + Number(last4)).slice(-8)}`;
           const created = await prisma.card.create({
             data: {
               userId,
@@ -354,7 +354,7 @@ export class CardsService {
                 card_number: pan,
                 cvv: "123",
                 expiredate: `12/${String((now.getFullYear() + 3) % 100).padStart(2, "0")}`,
-                panMasked: `4937********${last4}`,
+                panMasked: `4047********${last4}`,
                 issuanceFeeUsd: issuanceFee,
                 issuanceFeeTxId: feeTx.id,
                 defaultInitialLoadUsd: defaultLoad,
@@ -421,7 +421,7 @@ export class CardsService {
             status: providerCardId ? "ACTIVE" : "PENDING",
             balance: providerBalance,
             providerPayload: asJson({
-              product_code: data.product_code ?? "us_493_visa_bin",
+              product_code: data.product_code ?? "us_404_visa_bin",
               providerStatus: createdSens.providerStatus,
               ...(createdSens.pan ? { pan: createdSens.pan, card_number: createdSens.pan } : {}),
               ...(createdSens.cvv ? { cvv: createdSens.cvv } : {}),
@@ -569,7 +569,7 @@ export class CardsService {
         },
       });
 
-      // Funding often unlocks PAN/CVV on 493-BIN — refresh secrets after load.
+      // Funding often unlocks PAN/CVV on 404-BIN — refresh secrets after load.
       const synced = await this.syncProviderDetails(updated, { onlyIfMissing: true, retries: 3 });
 
       return {
@@ -592,7 +592,7 @@ export class CardsService {
   }
 
   /**
-   * Pull USD off a 493-BIN card into the merchant Pagocards wallet.
+   * Pull USD off a 404-BIN card into the merchant Pagocards wallet.
    * NGN is credited only after Pagocards webhook confirmation (simulated settles immediately).
    * @see https://pagocards.com/documentation — Withdraw 4XX-BIN Card
    */

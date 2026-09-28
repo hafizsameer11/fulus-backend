@@ -5,7 +5,7 @@ import { providerFetch } from "../../lib/provider-http.js";
 import { PAGO_VISA_BIN_PRODUCT } from "./constants.js";
 
 /**
- * Pagocards v1 Cards API — 493 Visa BIN (`us_493_visa_bin`).
+ * Pagocards v1 Cards API — 404 Visa BIN (`us_404_visa_bin`).
  * Docs: https://pagocards.com/documentation#v1-cards-create
  */
 export class PagocardsClient {
@@ -54,7 +54,7 @@ export class PagocardsClient {
     return data;
   }
 
-  /** POST /api/v1/cards — Visa 493 BIN virtual card. */
+  /** POST /api/v1/cards — Visa 404 BIN virtual card. */
   createVisaCard(input: {
     first_name: string;
     last_name: string;

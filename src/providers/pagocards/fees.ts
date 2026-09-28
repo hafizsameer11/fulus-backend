@@ -1,13 +1,13 @@
 /**
- * Pagocards 493-BIN Visa (`us_493_visa_bin`) published fees.
- * Source: https://pagocards.com/fees (XXX-BIN SERIES → 493-BIN)
+ * Pagocards 404-BIN Visa (`us_404_visa_bin`) published fees.
+ * Source: https://pagocards.com/fees (XXX-BIN SERIES → 404-BIN)
  * Create/fund mins: https://pagocards.com/documentation#v1-cards-create
  */
 export const PAGO_VISA = {
-  /** Card issuance — 493-BIN */
+  /** Card issuance — 404-BIN */
   issuanceFeeUsd: 0.65,
   /**
-   * Amount Pagocards loads onto a new 493-BIN card when `initial_load` is omitted.
+   * Amount Pagocards loads onto a new 404-BIN card when `initial_load` is omitted.
    * Do not call POST …/fund for this amount after create — it double-loads the card.
    */
   defaultInitialLoadUsd: 5,
@@ -17,13 +17,13 @@ export const PAGO_VISA = {
    */
   minFundUsd: 5,
   /**
-   * Card must retain at least this after withdraw (Pagocards 493-BIN rule).
+   * Card must retain at least this after withdraw (Pagocards 404-BIN rule).
    * e.g. $7 balance → max withdraw $2.
    */
   minRetainBalanceUsd: 5,
   /** @deprecated use minFundUsd — kept for mobile compatibility */
   minInitialFundUsd: 5,
-  /** Flat portion of every card load — 493-BIN */
+  /** Flat portion of every card load — 404-BIN */
   fundFeeFlatUsd: 0.15,
   /** Percent portion of every card load (0.75% → 0.0075) */
   fundFeeRate: 0.0075,
