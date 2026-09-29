@@ -1,4 +1,4 @@
-﻿-- AlterTable
+-- AlterTable
 ALTER TABLE `User` ADD COLUMN `username` VARCHAR(191) NULL,
     ADD COLUMN `country` VARCHAR(191) NULL,
     ADD COLUMN `bvn` VARCHAR(191) NULL,
