@@ -298,6 +298,18 @@ model PlatformConfig {
   updatedAt DateTime @updatedAt
 }
 
+/// Console staff — simple email/password login (seeded).
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("super_admin")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
 model Wallet {
   id        String         @id @default(cuid())
   userId    String

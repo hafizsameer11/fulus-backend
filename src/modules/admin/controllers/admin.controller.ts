@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
+import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { env } from "../../../config/env.js";
-import { AppError, UnauthorizedError } from "../../../lib/errors.js";
+import { UnauthorizedError } from "../../../lib/errors.js";
 import { ok } from "../../../lib/http.js";
 import { signAdminToken } from "../../../middleware/admin.js";
 import { prisma } from "../../../lib/prisma.js";
@@ -10,33 +10,28 @@ import { killSwitchService, putKillSwitchesSchema } from "../services/kill-switc
 
 const loginSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8),
+  password: z.string().min(1),
 });
 
 export class AdminAuthController {
-  /** Email/password staff login — no authenticator / Google 2FA. */
+  /** Simple email/password against seeded AdminUser. */
   login = async (req: Request, res: Response) => {
     const input = loginSchema.parse(req.body ?? {});
-    const expectedEmail = env.ADMIN_STAFF_EMAIL.trim().toLowerCase();
-    const expectedPassword = env.ADMIN_STAFF_PASSWORD;
-
-    if (!expectedEmail || !expectedPassword) {
-      throw new AppError(
-        "Staff login is not configured. Set ADMIN_STAFF_EMAIL and ADMIN_STAFF_PASSWORD.",
-        503,
-        "STAFF_AUTH_UNCONFIGURED",
-      );
+    const email = input.email.trim().toLowerCase();
+    const admin = await prisma.adminUser.findUnique({ where: { email } });
+    if (!admin || !admin.active) {
+      throw new UnauthorizedError("Invalid email or password");
     }
-
-    if (input.email.trim().toLowerCase() !== expectedEmail || input.password !== expectedPassword) {
-      throw new UnauthorizedError("Invalid staff email or password");
+    const valid = await bcrypt.compare(input.password, admin.passwordHash);
+    if (!valid) {
+      throw new UnauthorizedError("Invalid email or password");
     }
 
     const staff = {
-      id: `staff:${expectedEmail}`,
-      email: expectedEmail,
-      name: env.ADMIN_STAFF_NAME || "Fulus Admin",
-      role: "super_admin",
+      id: admin.id,
+      email: admin.email,
+      name: admin.name,
+      role: admin.role,
     };
     const token = signAdminToken(staff);
     return ok(res, { token, staff, expiresIn: "8h" });

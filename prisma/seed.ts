@@ -1,6 +1,15 @@
+import bcrypt from "bcryptjs";
 import { PrismaClient, WalletCurrency, BillCategory } from "@prisma/client";
 
 const prisma = new PrismaClient();
+
+/** Default console login after seed — change in production. */
+const SEED_ADMIN = {
+  email: "admin@fulus.app",
+  password: "Admin123!",
+  name: "Fulus Admin",
+  role: "super_admin",
+};
 
 // Quote lookup uses base=toCurrency, quote=fromCurrency; midRate multiplies from→to.
 // e.g. USD→NGN: base=NGN, quote=USD, midRate=1580 (1 USD buys 1580 NGN).
@@ -198,7 +207,26 @@ async function main() {
     data: { isActive: false },
   });
 
+  const passwordHash = await bcrypt.hash(SEED_ADMIN.password, 12);
+  await prisma.adminUser.upsert({
+    where: { email: SEED_ADMIN.email },
+    create: {
+      email: SEED_ADMIN.email,
+      passwordHash,
+      name: SEED_ADMIN.name,
+      role: SEED_ADMIN.role,
+      active: true,
+    },
+    update: {
+      passwordHash,
+      name: SEED_ADMIN.name,
+      role: SEED_ADMIN.role,
+      active: true,
+    },
+  });
+
   console.log(`Seeded ${FX_SEED.length} FX rates and ${BILL_SERVICES.length} bill services (no demo plan amounts)`);
+  console.log(`Admin login: ${SEED_ADMIN.email} / ${SEED_ADMIN.password}`);
 }
 
 main()

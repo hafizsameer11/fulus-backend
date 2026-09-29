@@ -10,12 +10,8 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default("7d"),
   /** NGN reward shown for referral program (single flat amount). */
   REFERRAL_REWARD_NGN: z.coerce.number().default(500),
-  /** Shared machine key for scripts; never use the default in production. */
-  ADMIN_API_KEY: z.string().optional().default("fulus-admin-dev-key"),
-  /** Bootstrap staff login (email/password). No Google/TOTP 2FA. */
-  ADMIN_STAFF_EMAIL: z.string().optional().default(""),
-  ADMIN_STAFF_PASSWORD: z.string().optional().default(""),
-  ADMIN_STAFF_NAME: z.string().optional().default("Fulus Admin"),
+  /** Optional machine key for scripts only. Staff use seeded AdminUser login. */
+  ADMIN_API_KEY: z.string().optional().default(""),
 
   PAGOCARDS_BASE_URL: z.string().url().default("https://pagocards.com"),
   PAGOCARDS_PUBLIC_KEY: z.string().optional().default(""),
@@ -78,9 +74,3 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
-
-if (env.NODE_ENV === "production" && env.ADMIN_API_KEY === "fulus-admin-dev-key") {
-  throw new Error(
-    "ADMIN_API_KEY must be set to a strong unique secret in production (default fulus-admin-dev-key is forbidden)",
-  );
-}

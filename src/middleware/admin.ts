@@ -19,32 +19,15 @@ declare global {
   }
 }
 
-const DEV_KEY = "fulus-admin-dev-key";
-
 export function signAdminToken(staff: Omit<AdminStaff, "kind">) {
   const payload: AdminStaff = { ...staff, kind: "staff" };
   return jwt.sign(payload, env.JWT_SECRET, { expiresIn: "8h" });
 }
 
+/** Accept staff JWT from login. Optional ADMIN_API_KEY only for scripts. */
 export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
-  const headerKey = req.header("x-admin-key");
   const bearer = req.header("authorization")?.replace(/^Bearer\s+/i, "");
-
-  if (headerKey) {
-    if (env.NODE_ENV === "production" && headerKey === DEV_KEY) {
-      return next(new UnauthorizedError("Default admin key is disabled"));
-    }
-    if (headerKey === env.ADMIN_API_KEY) {
-      req.admin = {
-        id: "api-key",
-        email: "api-key@fulus.local",
-        name: "API Key",
-        role: "super_admin",
-        kind: "staff",
-      };
-      return next();
-    }
-  }
+  const headerKey = req.header("x-admin-key");
 
   if (bearer) {
     try {
@@ -54,7 +37,7 @@ export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
           id: payload.id,
           email: payload.email,
           name: payload.name ?? payload.email,
-          role: payload.role ?? "ops",
+          role: payload.role ?? "super_admin",
           kind: "staff",
         };
         return next();
@@ -62,21 +45,19 @@ export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
     } catch {
       /* fall through */
     }
-    // Legacy: some clients still send the shared key as Bearer
-    if (bearer === env.ADMIN_API_KEY) {
-      if (env.NODE_ENV === "production" && bearer === DEV_KEY) {
-        return next(new UnauthorizedError("Default admin key is disabled"));
-      }
-      req.admin = {
-        id: "api-key",
-        email: "api-key@fulus.local",
-        name: "API Key",
-        role: "super_admin",
-        kind: "staff",
-      };
-      return next();
-    }
   }
 
-  return next(new UnauthorizedError("Invalid admin credentials"));
+  const key = headerKey || bearer;
+  if (key && env.ADMIN_API_KEY && key === env.ADMIN_API_KEY) {
+    req.admin = {
+      id: "api-key",
+      email: "scripts@fulus.local",
+      name: "API Key",
+      role: "super_admin",
+      kind: "staff",
+    };
+    return next();
+  }
+
+  return next(new UnauthorizedError("Sign in required"));
 }
