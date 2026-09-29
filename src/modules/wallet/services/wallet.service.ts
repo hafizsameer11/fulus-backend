@@ -111,9 +111,13 @@ export class WalletService {
     provider?: string;
     providerRef?: string;
     metadata?: Prisma.InputJsonValue;
+    /** Desk margin / included spread — shown on the transaction, not charged on top. */
+    fee?: Prisma.Decimal | number | string;
   }) {
     const amount = new Prisma.Decimal(params.amount);
     if (amount.lte(0)) throw new AppError("Amount must be positive");
+    const fee = params.fee != null ? new Prisma.Decimal(params.fee) : new Prisma.Decimal(0);
+    if (fee.lt(0)) throw new AppError("Fee cannot be negative");
     const description = scrubDescription(params.description);
 
     return prisma.$transaction(async (tx) => {
@@ -132,6 +136,7 @@ export class WalletService {
           type: params.type,
           status: "SUCCESS",
           amount,
+          fee,
           currency: params.currency,
           reference: makeReference("TX"),
           provider: params.provider,

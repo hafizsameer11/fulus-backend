@@ -133,6 +133,8 @@ apiRouter.get("/admin/crypto/orders", requireAdmin, asyncHandler(adminOpsControl
 apiRouter.get("/admin/crypto/orders/:id", requireAdmin, asyncHandler(adminOpsController.getCryptoOrder));
 apiRouter.get("/admin/crypto/addresses", requireAdmin, asyncHandler(adminOpsController.listCryptoAddresses));
 apiRouter.get("/admin/crypto/wallets", requireAdmin, asyncHandler(adminOpsController.listCryptoWallets));
+apiRouter.get("/admin/crypto/assets", requireAdmin, asyncHandler(adminOpsController.listCryptoAssets));
+apiRouter.put("/admin/crypto/assets/:code", requireAdmin, asyncHandler(adminOpsController.upsertCryptoAsset));
 apiRouter.get("/admin/esims", requireAdmin, asyncHandler(adminOpsController.listEsims));
 apiRouter.get("/admin/esim-orders", requireAdmin, asyncHandler(adminOpsController.listEsimOrders));
 apiRouter.get("/admin/referrals", requireAdmin, asyncHandler(adminOpsController.listReferrals));

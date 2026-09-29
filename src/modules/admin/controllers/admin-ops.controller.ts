@@ -3,6 +3,11 @@ import { ok } from "../../../lib/http.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { prisma } from "../../../lib/prisma.js";
 import { parsePagination } from "../lib/pagination.js";
+import {
+  cryptoAssetConfigSchema,
+  cryptoAssetConfigService,
+} from "../../crypto/services/crypto-asset-config.service.js";
+import { cryptoService } from "../../crypto/services/crypto.service.js";
 
 function userDisplayName(user: { firstName: string | null; lastName: string | null; email: string }) {
   const name = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
@@ -398,7 +403,7 @@ export class AdminOpsController {
   listCryptoWallets = async (_req: Request, res: Response) => {
     const rows = await prisma.wallet.groupBy({
       by: ["currency"],
-      where: { currency: { in: ["BTC", "ETH", "USDT"] }, isVirtual: false },
+      where: { currency: { in: ["BTC", "ETH", "USDT"] } },
       _sum: { available: true, pending: true },
       _count: true,
     });
@@ -410,6 +415,85 @@ export class AdminOpsController {
         holders: r._count,
       })),
     });
+  };
+
+  /** Asset registry: Busha mid + Fulus buy/sell spreads + customer holdings. */
+  listCryptoAssets = async (_req: Request, res: Response) => {
+    const [rates, configs, holdings] = await Promise.all([
+      cryptoService.rates(),
+      cryptoAssetConfigService.list(),
+      prisma.wallet.groupBy({
+        by: ["currency"],
+        where: { currency: { in: ["BTC", "ETH", "USDT"] } },
+        _sum: { available: true, pending: true },
+        _count: true,
+      }),
+    ]);
+    const holdBy = new Map<string, { customerHoldings: number; holders: number }>(
+      holdings.map((h) => [
+        String(h.currency),
+        {
+          customerHoldings: Number(h._sum.available ?? 0) + Number(h._sum.pending ?? 0),
+          holders: h._count,
+        },
+      ]),
+    );
+    const rateBy = new Map(
+      (rates as Array<Record<string, unknown>>).map((r) => [String(r.currency).toUpperCase(), r]),
+    );
+    const codes = new Set<string>([
+      ...configs.map((c) => c.code),
+      ...rateBy.keys(),
+      ...holdBy.keys(),
+    ]);
+    const assets = [...codes].sort().map((code) => {
+      const cfg = configs.find((c) => c.code === code) ?? {
+        code,
+        enabled: true,
+        buyEnabled: true,
+        sellEnabled: true,
+        sendEnabled: true,
+        buySpreadBps: 100,
+        sellSpreadBps: 100,
+        minTradeUsd: 2,
+        maxTradeUsd: 100_000,
+      };
+      const rate = rateBy.get(code) ?? {};
+      const hold = holdBy.get(code) ?? { customerHoldings: 0, holders: 0 };
+      const priceUsd = Number(rate.usd ?? 0);
+      return {
+        code,
+        enabled: cfg.enabled,
+        buyEnabled: cfg.buyEnabled,
+        sellEnabled: cfg.sellEnabled,
+        sendEnabled: cfg.sendEnabled,
+        buySpreadBps: cfg.buySpreadBps,
+        sellSpreadBps: cfg.sellSpreadBps,
+        minTradeUsd: cfg.minTradeUsd,
+        maxTradeUsd: cfg.maxTradeUsd,
+        priceUsd,
+        buyUsd: Number(rate.buyUsd ?? 0) || priceUsd * (1 + cfg.buySpreadBps / 10_000),
+        sellUsd: Number(rate.sellUsd ?? 0) || priceUsd * (1 - cfg.sellSpreadBps / 10_000),
+        ngn: Number(rate.ngn ?? 0),
+        buyNgn: Number(rate.buyNgn ?? 0),
+        sellNgn: Number(rate.sellNgn ?? 0),
+        bushaBuyNgn: Number(rate.bushaBuyNgn ?? rate.ngn ?? 0),
+        bushaSellNgn: Number(rate.bushaSellNgn ?? rate.ngn ?? 0),
+        provider: rate.provider ?? "busha",
+        customerHoldings: hold.customerHoldings,
+        holders: hold.holders,
+        updatedAt: cfg.updatedAt ?? null,
+      };
+    });
+    return ok(res, { assets });
+  };
+
+  upsertCryptoAsset = async (req: Request, res: Response) => {
+    const code = String(req.params.code ?? req.body?.code ?? "").toUpperCase();
+    if (!code) throw new AppError("code is required", 400, "BAD_REQUEST");
+    const input = cryptoAssetConfigSchema.parse({ ...req.body, code });
+    const asset = await cryptoAssetConfigService.upsert(input);
+    return ok(res, { asset });
   };
 
   listEsims = async (req: Request, res: Response) => {

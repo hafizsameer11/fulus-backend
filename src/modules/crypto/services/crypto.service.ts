@@ -14,6 +14,13 @@ import {
   simulateProviders,
   useBushaLive,
 } from "../../../lib/simulate.js";
+import {
+  applyBuySpread,
+  applySellSpread,
+  buyFactor,
+  sellFactor,
+  cryptoAssetConfigService,
+} from "./crypto-asset-config.service.js";
 
 export const quoteSchema = z.object({
   side: z.enum(["BUY", "SELL"]),
@@ -135,6 +142,83 @@ async function ensureCryptoWallet(userId: string, currency: WalletCurrency) {
     create: { userId, currency, isVirtual: true, available: 0, pending: 0 },
     update: {},
   });
+}
+
+/**
+ * Bake Fulus buy/sell spread into the customer-facing quote.
+ * Busha mid stays in busha_* fields; receive_amount / user_fiat_per_coin are all-in.
+ */
+async function bakeSpreadIntoQuote(
+  quote: Record<string, unknown>,
+  side: "BUY" | "SELL",
+  base: string,
+): Promise<Record<string, unknown>> {
+  const cfg = await cryptoAssetConfigService.get(base);
+  const amount = Number(quote.amount ?? quote.source_amount ?? 0);
+  const bushaReceive = Number(quote.receive_amount ?? quote.target_amount ?? 0);
+  if (!(bushaReceive > 0) || !(amount > 0)) {
+    return {
+      ...quote,
+      fulus_spread: {
+        side,
+        buySpreadBps: cfg.buySpreadBps,
+        sellSpreadBps: cfg.sellSpreadBps,
+        appliedBps: side === "BUY" ? cfg.buySpreadBps : cfg.sellSpreadBps,
+        allIn: true,
+      },
+    };
+  }
+
+  if (side === "BUY") {
+    const { customerReceive, factor, marginFraction } = applyBuySpread(
+      bushaReceive,
+      cfg.buySpreadBps,
+    );
+    const bushaSpend = amount / factor;
+    const margin = amount - bushaSpend;
+    const userFiatPerCoin = customerReceive > 0 ? amount / customerReceive : 0;
+    return {
+      ...quote,
+      receive_amount: String(customerReceive),
+      target_amount: String(customerReceive),
+      busha_receive_amount: String(bushaReceive),
+      busha_spend_amount: String(bushaSpend),
+      user_fiat_per_coin: userFiatPerCoin,
+      rate: String(amount > 0 ? customerReceive / amount : 0),
+      fulus_spread: {
+        side,
+        buySpreadBps: cfg.buySpreadBps,
+        sellSpreadBps: cfg.sellSpreadBps,
+        appliedBps: cfg.buySpreadBps,
+        margin,
+        marginFraction,
+        marginCurrency: quote.quote_currency,
+        bushaSpend,
+        allIn: true,
+      },
+    };
+  }
+
+  const { customerReceive, margin, factor } = applySellSpread(bushaReceive, cfg.sellSpreadBps);
+  const userFiatPerCoin = amount > 0 ? customerReceive / amount : 0;
+  return {
+    ...quote,
+    receive_amount: String(customerReceive),
+    target_amount: String(customerReceive),
+    busha_receive_amount: String(bushaReceive),
+    user_fiat_per_coin: userFiatPerCoin,
+    rate: String(userFiatPerCoin),
+    fulus_spread: {
+      side,
+      buySpreadBps: cfg.buySpreadBps,
+      sellSpreadBps: cfg.sellSpreadBps,
+      appliedBps: cfg.sellSpreadBps,
+      margin,
+      sellFactor: factor,
+      marginCurrency: quote.quote_currency,
+      allIn: true,
+    },
+  };
 }
 
 /** NIN must be PASSED before crypto trading / send / receive. */
@@ -314,12 +398,47 @@ export class CryptoService {
    * Prefer Busha /v1/pairs with NGN counter (buy_price / sell_price).
    */
   async rates() {
+    const decorate = async (rows: Array<Record<string, unknown>>) => {
+      const configs = await cryptoAssetConfigService.list(
+        rows.map((r) => String(r.currency ?? "")).filter(Boolean),
+      );
+      const byCode = new Map(configs.map((c) => [c.code, c]));
+      return rows.map((r) => {
+        const code = String(r.currency ?? "").toUpperCase();
+        const cfg = byCode.get(code);
+        const buyBps = cfg?.buySpreadBps ?? 100;
+        const sellBps = cfg?.sellSpreadBps ?? 100;
+        const midNgn = Number(r.ngn ?? r.buyNgn ?? r.sellNgn ?? 0);
+        const midUsd = Number(r.usd ?? 0);
+        const bushaBuy = Number(r.buyNgn ?? midNgn);
+        const bushaSell = Number(r.sellNgn ?? midNgn);
+        const buyNgn = bushaBuy > 0 ? bushaBuy * buyFactor(buyBps) : 0;
+        const sellNgn = bushaSell > 0 ? bushaSell * sellFactor(sellBps) : 0;
+        return {
+          ...r,
+          currency: code,
+          ngn: midNgn || bushaBuy || bushaSell,
+          buyNgn: buyNgn || undefined,
+          sellNgn: sellNgn || undefined,
+          buyUsd: midUsd > 0 ? midUsd * buyFactor(buyBps) : undefined,
+          sellUsd: midUsd > 0 ? midUsd * sellFactor(sellBps) : undefined,
+          bushaBuyNgn: bushaBuy || undefined,
+          bushaSellNgn: bushaSell || undefined,
+          buySpreadBps: buyBps,
+          sellSpreadBps: sellBps,
+          enabled: cfg?.enabled ?? true,
+          buyEnabled: cfg?.buyEnabled ?? true,
+          sellEnabled: cfg?.sellEnabled ?? true,
+          sendEnabled: cfg?.sendEnabled ?? true,
+        };
+      });
+    };
+
     if (useBushaLive()) {
       try {
         const pairsRaw = await bushaClient.listPairs({ currency: "NGN" });
         const pairs = unwrapList(pairsRaw);
         if (pairs.length) {
-          // FX row for USD→NGN is stored as base=NGN, quote=USD (NGN per 1 USD).
           const fxRows = await fxService.listRates();
           const usdToNgn =
             fxRows.find((r) => r.baseCurrency === "NGN" && r.quoteCurrency === "USD" && r.active)?.midRate;
@@ -328,7 +447,7 @@ export class CryptoService {
           const ngnPerUsd = usdToNgn ? Number(usdToNgn) : 0;
           const ngnPerSar = sarToNgn ? Number(sarToNgn) : 0;
 
-          return pairs
+          const mapped = pairs
             .map((p) => {
               const base = String(p.base ?? p.base_currency ?? "").toUpperCase();
               const counter = String(p.counter ?? p.counter_currency ?? "NGN").toUpperCase();
@@ -349,7 +468,8 @@ export class CryptoService {
                 provider: "busha",
               };
             })
-            .filter(Boolean);
+            .filter(Boolean) as Array<Record<string, unknown>>;
+          if (mapped.length) return decorate(mapped);
         }
       } catch (err) {
         console.error("[crypto] listPairs failed", err);
@@ -359,26 +479,31 @@ export class CryptoService {
         const raw = await bushaClient.getRates();
         const list = unwrapList(raw);
         if (list.length) {
-          return list.map((r) => ({
-            currency: String(r.currency ?? r.code ?? r.base_currency ?? "").toUpperCase(),
-            usd: Number(r.usd ?? r.price_usd ?? r.rate ?? r.price ?? 0),
-            ngn: Number(r.ngn ?? r.price_ngn ?? 0),
-            provider: "busha",
-          })).filter((r) => r.currency);
+          const mapped = list
+            .map((r) => ({
+              currency: String(r.currency ?? r.code ?? r.base_currency ?? "").toUpperCase(),
+              usd: Number(r.usd ?? r.price_usd ?? r.rate ?? r.price ?? 0),
+              ngn: Number(r.ngn ?? r.price_ngn ?? 0),
+              provider: "busha",
+            }))
+            .filter((r) => r.currency);
+          if (mapped.length) return decorate(mapped);
         }
       } catch (err) {
         console.error("[crypto] getRates failed", err);
       }
     }
-    return Object.entries(SIM_RATES).map(([currency, usd]) => ({
-      currency,
-      usd,
-      ngn: usd * 1580,
-      buyNgn: usd * 1580,
-      sellNgn: usd * 1570,
-      provider: "simulated",
-      simulated: true,
-    }));
+    return decorate(
+      Object.entries(SIM_RATES).map(([currency, usd]) => ({
+        currency,
+        usd,
+        ngn: usd * 1580,
+        buyNgn: usd * 1580,
+        sellNgn: usd * 1570,
+        provider: "simulated",
+        simulated: true,
+      })),
+    );
   }
 
   /**
@@ -436,34 +561,36 @@ export class CryptoService {
         });
         const userOut = ngnOut > 0 ? Math.round(fx.toAmount * 100) / 100 : 0;
         const rate = Number(asRecord(data.rate).rate ?? 0);
-        return {
-          id: strOf(data, ["id", "reference"]) ?? simRef("CQ"),
-          side: input.side,
-          base_currency: base,
-          quote_currency: userFiat,
-          busha_quote_currency: "NGN",
-          amount: String(amount),
-          receive_amount: String(userOut),
-          target_amount: String(userOut),
-          source_amount: String(amount),
-          ngn_amount: String(ngnOut),
-          rate: String(rate),
-          /** NGN per 1 coin (Busha). */
-          ngn_per_coin: rate || (amount > 0 ? ngnOut / amount : 0),
-          /** User fiat per 1 coin. */
-          user_fiat_per_coin: amount > 0 ? userOut / amount : 0,
-          provider: "busha",
-          fxBridge: {
-            direction: "ngn_to_user_fiat",
-            fromCurrency: "NGN",
-            toCurrency: userFiat,
-            fromAmount: ngnOut,
-            toAmount: userOut,
-            rateApplied: fx.rateApplied,
+        return bakeSpreadIntoQuote(
+          {
+            id: strOf(data, ["id", "reference"]) ?? simRef("CQ"),
+            side: input.side,
+            base_currency: base,
+            quote_currency: userFiat,
+            busha_quote_currency: "NGN",
+            amount: String(amount),
+            receive_amount: String(userOut),
+            target_amount: String(userOut),
+            source_amount: String(amount),
+            ngn_amount: String(ngnOut),
+            rate: String(rate),
+            ngn_per_coin: rate || (amount > 0 ? ngnOut / amount : 0),
+            user_fiat_per_coin: amount > 0 ? userOut / amount : 0,
+            provider: "busha",
+            fxBridge: {
+              direction: "ngn_to_user_fiat",
+              fromCurrency: "NGN",
+              toCurrency: userFiat,
+              fromAmount: ngnOut,
+              toAmount: userOut,
+              rateApplied: fx.rateApplied,
+            },
+            raw: data,
+            expires_at: strOf(data, ["expires_at"]),
           },
-          raw: data,
-          expires_at: strOf(data, ["expires_at"]),
-        };
+          "SELL",
+          base,
+        );
       }
 
       const body =
@@ -492,27 +619,31 @@ export class CryptoService {
       const userFiatPerCoin =
         input.side === "BUY" && amount > 0 ? amount / receiveAmount : receiveAmount / amount;
 
-      return {
-        id: strOf(data, ["id", "reference"]) ?? simRef("CQ"),
-        side: input.side,
-        base_currency: base,
-        quote_currency: userFiat,
-        busha_quote_currency: bushaFiat,
-        amount: String(amount),
-        receive_amount: String(receiveAmount),
-        target_amount: String(receiveAmount),
-        source_amount: strOf(data, ["source_amount"]) ?? String(bushaSourceAmount),
-        ngn_amount: bushaFiat === "NGN" ? String(bushaSourceAmount) : undefined,
-        rate: String(rate),
-        ngn_per_coin: bushaFiat === "NGN" && input.side === "BUY" && receiveAmount > 0
-          ? bushaSourceAmount / receiveAmount
-          : rate,
-        user_fiat_per_coin: userFiatPerCoin,
-        provider: "busha",
-        fxBridge,
-        raw: data,
-        expires_at: strOf(data, ["expires_at"]),
-      };
+      return bakeSpreadIntoQuote(
+        {
+          id: strOf(data, ["id", "reference"]) ?? simRef("CQ"),
+          side: input.side,
+          base_currency: base,
+          quote_currency: userFiat,
+          busha_quote_currency: bushaFiat,
+          amount: String(amount),
+          receive_amount: String(receiveAmount),
+          target_amount: String(receiveAmount),
+          source_amount: strOf(data, ["source_amount"]) ?? String(bushaSourceAmount),
+          ngn_amount: bushaFiat === "NGN" ? String(bushaSourceAmount) : undefined,
+          rate: String(rate),
+          ngn_per_coin: bushaFiat === "NGN" && input.side === "BUY" && receiveAmount > 0
+            ? bushaSourceAmount / receiveAmount
+            : rate,
+          user_fiat_per_coin: userFiatPerCoin,
+          provider: "busha",
+          fxBridge,
+          raw: data,
+          expires_at: strOf(data, ["expires_at"]),
+        },
+        input.side,
+        base,
+      );
     }
 
     const baseUsd = SIM_RATES[base] ?? 1;
@@ -528,19 +659,23 @@ export class CryptoService {
       receiveAmount = sellUsd / (userFiat === "USD" ? 1 : quoteUsd);
     }
 
-    return {
-      id: simRef("CQ"),
-      side: input.side,
-      base_currency: base,
-      quote_currency: userFiat,
-      amount: String(amount),
-      receive_amount: receiveAmount.toFixed(8),
-      target_amount: receiveAmount.toFixed(8),
-      rate: (receiveAmount / amount).toFixed(8),
-      user_fiat_per_coin: amount > 0 ? (input.side === "BUY" ? amount / receiveAmount : receiveAmount / amount) : 0,
-      simulated: true,
-      expires_at: new Date(Date.now() + 60_000).toISOString(),
-    };
+    return bakeSpreadIntoQuote(
+      {
+        id: simRef("CQ"),
+        side: input.side,
+        base_currency: base,
+        quote_currency: userFiat,
+        amount: String(amount),
+        receive_amount: receiveAmount.toFixed(8),
+        target_amount: receiveAmount.toFixed(8),
+        rate: (receiveAmount / amount).toFixed(8),
+        user_fiat_per_coin: amount > 0 ? (input.side === "BUY" ? amount / receiveAmount : receiveAmount / amount) : 0,
+        simulated: true,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      },
+      input.side,
+      base,
+    );
   }
 
   async listOrders(userId: string) {
@@ -661,13 +796,21 @@ export class CryptoService {
       return this.createBankBuyOrder(userId, input, customer?.bushaCustomerId ?? null, live);
     }
 
+    await cryptoAssetConfigService.assertTradeAllowed(input.baseCurrency.toUpperCase(), "SELL");
+
     const quote = await this.createQuote(
       input,
       customer?.bushaCustomerId ?? undefined,
       userId,
     );
-    const receiveAmount = Number(quote.receive_amount ?? quote.target_amount ?? amount);
+    const receiveAmount = Number(
+      (quote as Record<string, unknown>).receive_amount ??
+        (quote as Record<string, unknown>).target_amount ??
+        amount,
+    );
     const fxBridge = (quote as { fxBridge?: Record<string, unknown> | null }).fxBridge ?? null;
+    const spread = asRecord((quote as { fulus_spread?: unknown }).fulus_spread);
+    const margin = Number(spread.margin ?? 0);
 
     const walletTx = await walletService.debit({
       userId,
@@ -681,8 +824,12 @@ export class CryptoService {
         side: "SELL",
         creditCurrency,
         creditAmount: receiveAmount,
-        quoteId: quote.id,
+        quoteId: (quote as { id?: string }).id,
         fxBridge,
+        fulusSpread: spread,
+        fee: margin,
+        feeCurrency: input.quoteCurrency.toUpperCase(),
+        feeIncludedInRate: true,
         walletDebited: true,
       }),
     });
@@ -693,9 +840,12 @@ export class CryptoService {
       let status: "SUCCESS" | "PROCESSING" = "SUCCESS";
 
       if (live) {
-        const fresh = await this.createQuote(input, customer!.bushaCustomerId!, userId);
+        const fresh = (await this.createQuote(input, customer!.bushaCustomerId!, userId)) as Record<
+          string,
+          unknown
+        >;
         const transferRaw = await bushaClient.createTransfer(
-          { quote_id: fresh.id },
+          { quote_id: String(fresh.id) },
           customer!.bushaCustomerId!,
         );
         providerResult = unwrapData(transferRaw);
@@ -713,6 +863,7 @@ export class CryptoService {
             description: `SELL credit ${creditCurrency}`,
             provider: "simulated",
             providerRef: walletTx.reference,
+            metadata: asJson({ fulusSpread: spread, fee: margin, feeIncludedInRate: true }),
           });
         }
       }
@@ -738,6 +889,9 @@ export class CryptoService {
               creditCurrency,
               creditAmount: receiveAmount,
               fxBridge,
+              fulusSpread: spread,
+              fee: margin,
+              feeIncludedInRate: true,
               walletDebited: true,
               awaitingWebhook: live,
             }),
@@ -773,6 +927,8 @@ export class CryptoService {
     const base = input.baseCurrency.toUpperCase();
     const creditCurrency = base as WalletCurrency;
 
+    await cryptoAssetConfigService.assertTradeAllowed(base, "BUY");
+
     if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
       await ensureCryptoWallet(userId, creditCurrency);
     }
@@ -799,7 +955,22 @@ export class CryptoService {
     }
     if (!(ngnAmount > 0)) throw new AppError("Invalid payment amount");
 
-    // Debit Fulus NGN first (virtual ledger). Master float funds Busha separately.
+    const cfg = await cryptoAssetConfigService.get(base);
+    const factor = buyFactor(cfg.buySpreadBps);
+    const bushaSpend = Math.round((ngnAmount / factor) * 100) / 100;
+    const margin = Math.round((ngnAmount - bushaSpend) * 100) / 100;
+    const fulusSpread = {
+      side: "BUY" as const,
+      buySpreadBps: cfg.buySpreadBps,
+      sellSpreadBps: cfg.sellSpreadBps,
+      appliedBps: cfg.buySpreadBps,
+      margin,
+      bushaSpend,
+      allIn: true,
+      marginCurrency: "NGN",
+    };
+
+    // Debit full all-in NGN (virtual ledger). Master float funds Busha at bushaSpend only.
     const debitTx = await walletService.debit({
       userId,
       currency: "NGN",
@@ -807,6 +978,7 @@ export class CryptoService {
       type: "CRYPTO_BUY",
       description: `Buy ${base} · ₦${ngnAmount.toLocaleString()}`,
       provider: live ? "busha" : "simulated",
+      fee: margin,
       metadata: asJson({
         kind: "crypto_bank_buy_debit",
         side: "BUY",
@@ -814,6 +986,9 @@ export class CryptoService {
         userFiat,
         userFiatAmount: amount,
         fxBridge,
+        fulusSpread,
+        fee: margin,
+        feeIncludedInRate: true,
         walletDebited: true,
         masterFloatBuy: true,
       }),
@@ -834,7 +1009,7 @@ export class CryptoService {
             {
               source_currency: "NGN",
               target_currency: base,
-              source_amount: String(ngnAmount),
+              source_amount: String(bushaSpend),
               pay_in: { type: "temporary_bank_account" },
               pay_out: { type: "balance" },
             },
@@ -858,7 +1033,7 @@ export class CryptoService {
 
         const { bushaFloatService } = await import("../../../providers/busha/float.js");
         const payout = await bushaFloatService.payoutFromMaster({
-          amount: ngnAmount,
+          amount: bushaSpend,
           accountName: bank.accountName || "Fulus Buy",
           accountNumber: bank.accountNumber,
           bankName: bank.bankName || "Partner Bank",
@@ -874,23 +1049,23 @@ export class CryptoService {
       } else {
         receiveAmount =
           base === "USDT" || base === "USDC"
-            ? ngnAmount / 1580
+            ? bushaSpend / 1580
             : SIM_RATES[base]
-              ? ngnAmount / (SIM_RATES[base] * 1580)
-              : ngnAmount / 1580;
+              ? bushaSpend / (SIM_RATES[base] * 1580)
+              : bushaSpend / 1580;
         providerRef = simRef("BU");
         quoteRaw = {
           id: simRef("CQ"),
           source_currency: "NGN",
           target_currency: base,
-          source_amount: String(ngnAmount),
+          source_amount: String(bushaSpend),
           target_amount: String(receiveAmount),
           simulated: true,
         };
         transfer = {
           id: providerRef,
           simulated: true,
-          source_amount: String(ngnAmount),
+          source_amount: String(bushaSpend),
           target_amount: String(receiveAmount),
           pay_in: {
             type: "temporary_bank_account",
@@ -903,7 +1078,7 @@ export class CryptoService {
             },
           },
         };
-        masterPayout = { simulated: true, amount: ngnAmount };
+        masterPayout = { simulated: true, amount: bushaSpend };
       }
     } catch (error) {
       await walletService.credit({
@@ -921,6 +1096,7 @@ export class CryptoService {
     const bankAccount = {
       ...extractTempBank(transfer),
       amount: ngnAmount,
+      bushaSpend,
       currency: "NGN",
       userFiat,
       userFiatAmount: amount,
@@ -939,6 +1115,9 @@ export class CryptoService {
           creditAmount: receiveAmount,
           bankAccount,
           fxBridge,
+          fulusSpread,
+          fee: margin,
+          feeIncludedInRate: true,
           walletDebited: true,
           masterFloatBuy: true,
           masterPayout,
@@ -957,7 +1136,7 @@ export class CryptoService {
         quoteCurrency: userFiat,
         amount,
         quoteAmount: receiveAmount,
-        rate: amount > 0 ? receiveAmount / amount : 0,
+        rate: receiveAmount > 0 ? ngnAmount / receiveAmount : 0,
         network: input.network,
         provider: live ? "busha" : "simulated",
         providerRef,
@@ -969,6 +1148,9 @@ export class CryptoService {
           creditAmount: receiveAmount,
           bankAccount,
           fxBridge,
+          fulusSpread,
+          fee: margin,
+          feeIncludedInRate: true,
           walletDebited: true,
           masterFloatBuy: true,
           masterPayout,
@@ -989,7 +1171,7 @@ export class CryptoService {
         description: `Buy ${creditCurrency} (simulated)`,
         provider: "simulated",
         providerRef: `${providerRef}_credit`,
-        metadata: asJson({ orderId: order.id, simulated: true }),
+        metadata: asJson({ orderId: order.id, simulated: true, fulusSpread, fee: margin }),
       });
       await prisma.cryptoOrder.update({
         where: { id: order.id },
