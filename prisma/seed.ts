@@ -225,6 +225,9 @@ async function main() {
     },
   });
 
+  const { ensureAdminModulesSeed } = await import("../src/modules/admin/services/admin-modules.seed.js");
+  await ensureAdminModulesSeed();
+
   console.log(`Seeded ${FX_SEED.length} FX rates and ${BILL_SERVICES.length} bill services (no demo plan amounts)`);
   console.log(`Admin login: ${SEED_ADMIN.email} / ${SEED_ADMIN.password}`);
 }

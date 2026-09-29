@@ -26,6 +26,7 @@ import {
 import { adminListController } from "../modules/admin/controllers/admin-list.controller.js";
 import { adminOpsController } from "../modules/admin/controllers/admin-ops.controller.js";
 import { adminConsoleController } from "../modules/admin/controllers/admin-console.controller.js";
+import { adminModulesController } from "../modules/admin/controllers/admin-modules.controller.js";
 import { sessionsController } from "../modules/sessions/controllers/sessions.controller.js";
 import { securityController } from "../modules/security/controllers/security.controller.js";
 import { referralsController } from "../modules/referrals/controllers/referrals.controller.js";
@@ -149,6 +150,57 @@ apiRouter.put("/admin/platform-config", requireAdmin, asyncHandler(adminOpsContr
 apiRouter.get("/admin/audit", requireAdmin, asyncHandler(adminOpsController.listAudit));
 apiRouter.get("/admin/support/stats", requireAdmin, asyncHandler(adminOpsController.supportStats));
 apiRouter.get("/admin/revenue", requireAdmin, asyncHandler(adminOpsController.revenueSummary));
+
+apiRouter.get("/admin/compliance/aml/rules", requireAdmin, asyncHandler(adminModulesController.getAmlRules));
+apiRouter.put("/admin/compliance/aml/rules", requireAdmin, asyncHandler(adminModulesController.putAmlRules));
+apiRouter.get("/admin/compliance/aml/alerts", requireAdmin, asyncHandler(adminModulesController.listAmlAlerts));
+apiRouter.post("/admin/compliance/aml/alerts/:id/clear", requireAdmin, asyncHandler(adminModulesController.clearAmlAlert));
+apiRouter.post("/admin/compliance/aml/alerts/:id/escalate", requireAdmin, asyncHandler(adminModulesController.escalateAmlAlert));
+apiRouter.get("/admin/compliance/sanctions/lists", requireAdmin, asyncHandler(adminModulesController.getSanctionLists));
+apiRouter.put("/admin/compliance/sanctions/lists", requireAdmin, asyncHandler(adminModulesController.putSanctionLists));
+apiRouter.get("/admin/compliance/sanctions/hits", requireAdmin, asyncHandler(adminModulesController.listSanctionHits));
+apiRouter.post("/admin/compliance/sanctions/hits/:id/clear", requireAdmin, asyncHandler(adminModulesController.clearSanctionHit));
+apiRouter.post("/admin/compliance/sanctions/hits/:id/confirm", requireAdmin, asyncHandler(adminModulesController.confirmSanctionHit));
+apiRouter.get("/admin/compliance/cases", requireAdmin, asyncHandler(adminModulesController.listCases));
+apiRouter.get("/admin/compliance/cases/:id", requireAdmin, asyncHandler(adminModulesController.getCase));
+apiRouter.post("/admin/compliance/cases/:id/advance", requireAdmin, asyncHandler(adminModulesController.advanceCase));
+apiRouter.get("/admin/compliance/reports", requireAdmin, asyncHandler(adminModulesController.listRegReports));
+apiRouter.post("/admin/compliance/reports/:id/submit", requireAdmin, asyncHandler(adminModulesController.submitRegReport));
+apiRouter.get("/admin/compliance/dsr", requireAdmin, asyncHandler(adminModulesController.listDsr));
+apiRouter.post("/admin/compliance/dsr/:id/fulfil", requireAdmin, asyncHandler(adminModulesController.fulfilDsr));
+apiRouter.post("/admin/compliance/dsr/:id/refuse", requireAdmin, asyncHandler(adminModulesController.refuseDsr));
+
+apiRouter.get("/admin/card-programs", requireAdmin, asyncHandler(adminModulesController.listCardPrograms));
+apiRouter.post("/admin/card-programs", requireAdmin, asyncHandler(adminModulesController.createCardProgram));
+apiRouter.put("/admin/card-programs/:id", requireAdmin, asyncHandler(adminModulesController.updateCardProgram));
+apiRouter.get("/admin/card-authorisations", requireAdmin, asyncHandler(adminModulesController.listCardAuthorisations));
+apiRouter.post("/admin/card-authorisations/:id/reverse", requireAdmin, asyncHandler(adminModulesController.reverseCardAuthorisation));
+apiRouter.get("/admin/cards/bin-rules", requireAdmin, asyncHandler(adminModulesController.getBinRules));
+apiRouter.put("/admin/cards/bin-rules", requireAdmin, asyncHandler(adminModulesController.putBinRules));
+apiRouter.get("/admin/cards/limit-tiers", requireAdmin, asyncHandler(adminModulesController.getLimitTiers));
+apiRouter.put("/admin/cards/limit-tiers", requireAdmin, asyncHandler(adminModulesController.putLimitTiers));
+apiRouter.get("/admin/cards/mcc-rules", requireAdmin, asyncHandler(adminModulesController.getMccRules));
+apiRouter.put("/admin/cards/mcc-rules", requireAdmin, asyncHandler(adminModulesController.putMccRules));
+
+apiRouter.get("/admin/crypto/networks", requireAdmin, asyncHandler(adminModulesController.listCryptoNetworks));
+apiRouter.put("/admin/crypto/networks", requireAdmin, asyncHandler(adminModulesController.putCryptoNetworks));
+apiRouter.put("/admin/crypto/networks/:id", requireAdmin, asyncHandler(adminModulesController.updateCryptoNetwork));
+apiRouter.get("/admin/crypto/exposures", requireAdmin, asyncHandler(adminModulesController.listCryptoExposures));
+apiRouter.put("/admin/crypto/exposures", requireAdmin, asyncHandler(adminModulesController.putCryptoExposures));
+apiRouter.post("/admin/crypto/exposures/:asset/halt", requireAdmin, asyncHandler(adminModulesController.haltCryptoExposure));
+
+apiRouter.get("/admin/engagement/campaigns", requireAdmin, asyncHandler(adminModulesController.listCampaigns));
+apiRouter.post("/admin/engagement/campaigns", requireAdmin, asyncHandler(adminModulesController.createCampaign));
+apiRouter.put("/admin/engagement/campaigns/:id", requireAdmin, asyncHandler(adminModulesController.updateCampaign));
+apiRouter.post("/admin/engagement/campaigns/:id/launch", requireAdmin, asyncHandler(adminModulesController.launchCampaign));
+apiRouter.post("/admin/engagement/campaigns/:id/pause", requireAdmin, asyncHandler(adminModulesController.pauseCampaign));
+apiRouter.post("/admin/engagement/campaigns/:id/end", requireAdmin, asyncHandler(adminModulesController.endCampaign));
+
+apiRouter.get("/admin/analytics/metrics/:key", requireAdmin, asyncHandler(adminModulesController.analyticsMetric));
+apiRouter.get("/admin/analytics/cohorts", requireAdmin, asyncHandler(adminModulesController.analyticsCohorts));
+apiRouter.get("/admin/analytics/funnels", requireAdmin, asyncHandler(adminModulesController.analyticsFunnels));
+apiRouter.get("/admin/analytics/reports", requireAdmin, asyncHandler(adminModulesController.listAnalyticsReports));
+apiRouter.post("/admin/analytics/reports", requireAdmin, asyncHandler(adminModulesController.createAnalyticsReport));
 apiRouter.get(
   "/admin/float",
   requireAdmin,

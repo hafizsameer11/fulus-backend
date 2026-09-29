@@ -945,3 +945,191 @@ model FxRateChange {
   @@index([createdAt])
 }
 
+model AmlAlert {
+  id           String   @id @default(cuid())
+  ruleId       String
+  userId       String?
+  customerName String   @default("")
+  score        Int      @default(0)
+  valueUsd     Decimal  @default(0) @db.Decimal(24, 2)
+  status       String   @default("open")
+  assignee     String   @default("")
+  narrative    String   @db.Text
+  legs         Json?
+  openedAt     DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([status, openedAt])
+  @@index([userId])
+}
+
+model SanctionHit {
+  id          String   @id @default(cuid())
+  userId      String?
+  subject     String
+  matchedName String
+  list        String
+  matchScore  Int
+  dobDelta    String   @default("")
+  country     String   @default("")
+  program     String   @default("")
+  status      String   @default("pending")
+  maker       String   @default("")
+  checker     String   @default("")
+  context     String   @db.Text
+  screenedAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, screenedAt])
+}
+
+model ComplianceCase {
+  id           String    @id @default(cuid())
+  title        String
+  type         String
+  severity     String    @default("medium")
+  stage        String    @default("intake")
+  userId       String?
+  subject      String    @default("")
+  assignee     String    @default("")
+  exposureUsd  Decimal   @default(0) @db.Decimal(24, 2)
+  linkedAlerts Json?
+  evidence     Json?
+  narrative    String    @db.Text
+  sarRef       String?
+  openedAt     DateTime  @default(now())
+  dueAt        DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([stage, openedAt])
+}
+
+model RegReport {
+  id          String    @id @default(cuid())
+  regulator   String
+  name        String
+  cadence     String
+  period      String
+  status      String    @default("draft")
+  dueAt       DateTime?
+  submittedAt DateTime?
+  ref         String?
+  rows        Int       @default(0)
+  retention   String    @default("7y")
+  owner       String    @default("")
+  payload     Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model DsrRequest {
+  id         String    @id @default(cuid())
+  kind       String
+  userId     String?
+  subject    String
+  status     String    @default("open")
+  legalHold  Boolean   @default(false)
+  holdReason String?
+  channel    String    @default("email")
+  receivedAt DateTime  @default(now())
+  dueAt      DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model CardProgram {
+  id             String   @id @default(cuid())
+  name           String
+  network        String
+  processor      String   @default("")
+  bin            String   @default("")
+  currency       String   @default("USD")
+  formFactor     String   @default("virtual")
+  issuanceFeeUsd Decimal  @default(0) @db.Decimal(24, 2)
+  monthlyFeeUsd  Decimal  @default(0) @db.Decimal(24, 2)
+  fxMarkupPct    Decimal  @default(0) @db.Decimal(8, 4)
+  status         String   @default("live")
+  cardsIssued    Int      @default(0)
+  activeCards    Int      @default(0)
+  spend30dUsd    Decimal  @default(0) @db.Decimal(24, 2)
+  approvalRate   Decimal  @default(0) @db.Decimal(8, 4)
+  bufferUsd      Decimal  @default(0) @db.Decimal(24, 2)
+  countries      Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model CardAuthorization {
+  id            String   @id @default(cuid())
+  cardId        String?
+  userId        String?
+  last4         String   @default("")
+  customerName  String   @default("")
+  merchant      String
+  mcc           String   @default("")
+  mccLabel      String   @default("")
+  country       String   @default("")
+  amount        Decimal  @db.Decimal(24, 8)
+  currency      String   @default("USD")
+  billingAmount Decimal  @default(0) @db.Decimal(24, 8)
+  fxRate        Decimal  @default(1) @db.Decimal(24, 12)
+  decision      String   @default("approved")
+  declineCode   String?
+  threeDs       Boolean  @default(false)
+  networkRef    String?
+  latencyMs     Int      @default(0)
+  riskScore     Int      @default(0)
+  at            DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([at])
+  @@index([decision, at])
+  @@index([userId])
+}
+
+model EngagementCampaign {
+  id        String   @id @default(cuid())
+  channel   String
+  name      String
+  status    String   @default("draft")
+  payload   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([channel, status])
+}
+
+model CryptoNetworkPolicy {
+  id                  String   @id
+  name                String
+  short               String   @default("")
+  assets              Json?
+  status              String   @default("healthy")
+  depositsEnabled     Boolean  @default(true)
+  withdrawalsEnabled  Boolean  @default(true)
+  confirmations       Int      @default(1)
+  avgBlockSec         Int      @default(0)
+  medianConfirmMin    Decimal  @default(0) @db.Decimal(12, 4)
+  networkFeeUsd       Decimal  @default(0) @db.Decimal(24, 8)
+  feePolicy           String   @default("customer")
+  pendingDeposits     Int      @default(0)
+  pendingWithdrawals  Int      @default(0)
+  notice              String?
+  explorer            String   @default("")
+  updatedAt           DateTime @updatedAt
+}
+
+model CryptoExposure {
+  asset            String   @id
+  netPositionCoin  Decimal  @default(0) @db.Decimal(24, 8)
+  netPositionUsd   Decimal  @default(0) @db.Decimal(24, 2)
+  limitUsd         Decimal  @default(0) @db.Decimal(24, 2)
+  hedgeRatio       Decimal  @default(0) @db.Decimal(8, 4)
+  pnl24hUsd        Decimal  @default(0) @db.Decimal(24, 2)
+  autoHalt         Boolean  @default(false)
+  updatedAt        DateTime @updatedAt
+}
+
