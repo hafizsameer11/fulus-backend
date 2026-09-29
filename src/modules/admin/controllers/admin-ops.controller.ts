@@ -814,6 +814,31 @@ export class AdminOpsController {
       })),
     });
   };
+
+  listAudit = async (req: Request, res: Response) => {
+    const { page, limit, skip } = parsePagination(req);
+    const [total, items] = await Promise.all([
+      prisma.adminAuditLog.count(),
+      prisma.adminAuditLog.findMany({
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+      }),
+    ]);
+    return ok(res, {
+      entries: items.map((e) => ({
+        id: e.id,
+        actor: e.actor,
+        action: e.action,
+        subjectId: e.subjectId,
+        detail: e.detail,
+        createdAt: e.createdAt,
+      })),
+      page,
+      limit,
+      total,
+    });
+  };
 }
 
 export const adminOpsController = new AdminOpsController();

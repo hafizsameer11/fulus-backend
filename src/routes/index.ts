@@ -146,6 +146,7 @@ apiRouter.get("/admin/devices", requireAdmin, asyncHandler(adminOpsController.li
 apiRouter.post("/admin/devices/:id/revoke", requireAdmin, asyncHandler(adminOpsController.revokeDevice));
 apiRouter.get("/admin/platform-config", requireAdmin, asyncHandler(adminOpsController.listPlatformConfig));
 apiRouter.put("/admin/platform-config", requireAdmin, asyncHandler(adminOpsController.upsertPlatformConfig));
+apiRouter.get("/admin/audit", requireAdmin, asyncHandler(adminOpsController.listAudit));
 apiRouter.get("/admin/support/stats", requireAdmin, asyncHandler(adminOpsController.supportStats));
 apiRouter.get("/admin/revenue", requireAdmin, asyncHandler(adminOpsController.revenueSummary));
 apiRouter.get(
