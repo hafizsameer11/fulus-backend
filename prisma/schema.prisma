@@ -150,6 +150,8 @@ model User {
   passwordHash         String
   firstName            String?
   lastName             String?
+  /// Relative path under storage/avatars (e.g. avatars/{userId}.jpg)
+  avatarPath           String?
   /// YYYY-MM-DD from NIN KYC
   dateOfBirth          String?
   /// Verified NIN digits

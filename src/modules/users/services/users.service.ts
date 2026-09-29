@@ -2,11 +2,14 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { resolveAvatarAbsPath, saveUserAvatar } from "../../../lib/avatar-storage.js";
 
 export const updateProfileSchema = z.object({
   firstName: z.string().min(1).optional(),
   lastName: z.string().min(1).optional(),
   phone: z.string().min(8).optional().nullable(),
+  /** Base64 or data-URL image for profile photo */
+  avatar: z.string().min(40).optional(),
 });
 
 export const changePasswordSchema = z.object({
@@ -18,59 +21,73 @@ export const closureRequestSchema = z.object({
   reason: z.string().min(3).max(2000),
 });
 
+const profileSelect = {
+  id: true,
+  email: true,
+  phone: true,
+  firstName: true,
+  lastName: true,
+  avatarPath: true,
+  status: true,
+  kycStatus: true,
+  kycTier: true,
+  dateOfBirth: true,
+  nin: true,
+  bushaCustomerId: true,
+  bushaCustomerStatus: true,
+  emailVerifiedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+function withAvatarUrl<T extends { id: string; avatarPath: string | null }>(user: T) {
+  const { avatarPath, ...rest } = user;
+  return {
+    ...rest,
+    hasAvatar: Boolean(avatarPath),
+    /** Client builds full URL as `${API_URL}/avatars/${id}` */
+    avatarUrl: avatarPath ? `/avatars/${user.id}` : null,
+  };
+}
+
 export class UsersService {
   async getMe(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        email: true,
-        phone: true,
-        firstName: true,
-        lastName: true,
-        status: true,
-        kycStatus: true,
-        kycTier: true,
-        dateOfBirth: true,
-        nin: true,
-        bushaCustomerId: true,
-        bushaCustomerStatus: true,
-        emailVerifiedAt: true,
-        createdAt: true,
-        updatedAt: true,
-      },
+      select: profileSelect,
     });
 
     if (!user) throw new NotFoundError("User not found");
-    return user;
+    return withAvatarUrl(user);
   }
 
   async updateMe(userId: string, input: z.infer<typeof updateProfileSchema>) {
-    return prisma.user.update({
+    let avatarPath: string | undefined;
+    if (input.avatar) {
+      avatarPath = await saveUserAvatar(userId, input.avatar);
+    }
+
+    const user = await prisma.user.update({
       where: { id: userId },
       data: {
         ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
         ...(input.lastName !== undefined ? { lastName: input.lastName } : {}),
         ...(input.phone !== undefined ? { phone: input.phone } : {}),
+        ...(avatarPath !== undefined ? { avatarPath } : {}),
       },
-      select: {
-        id: true,
-        email: true,
-        phone: true,
-        firstName: true,
-        lastName: true,
-        status: true,
-        kycStatus: true,
-        kycTier: true,
-        dateOfBirth: true,
-        nin: true,
-        bushaCustomerId: true,
-        bushaCustomerStatus: true,
-        emailVerifiedAt: true,
-        createdAt: true,
-        updatedAt: true,
-      },
+      select: profileSelect,
     });
+    return withAvatarUrl(user);
+  }
+
+  async getAvatarFile(userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { avatarPath: true },
+    });
+    if (!user?.avatarPath) throw new NotFoundError("Avatar not found");
+    const abs = resolveAvatarAbsPath(user.avatarPath);
+    return { abs, avatarPath: user.avatarPath };
   }
 
   async changePassword(userId: string, input: z.infer<typeof changePasswordSchema>) {

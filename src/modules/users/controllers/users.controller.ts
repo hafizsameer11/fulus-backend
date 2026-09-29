@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import path from "node:path";
 import { ok } from "../../../lib/http.js";
 import { UnauthorizedError } from "../../../lib/errors.js";
 import {
@@ -17,6 +18,17 @@ export class UsersController {
   updateMe = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();
     return ok(res, await usersService.updateMe(req.user.id, updateProfileSchema.parse(req.body)));
+  };
+
+  avatar = async (req: Request, res: Response) => {
+    const userId = String(req.params.userId ?? "");
+    const { abs, avatarPath } = await usersService.getAvatarFile(userId);
+    const ext = path.extname(avatarPath).toLowerCase();
+    const mime =
+      ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Content-Type", mime);
+    return res.sendFile(abs);
   };
 
   changePassword = async (req: Request, res: Response) => {

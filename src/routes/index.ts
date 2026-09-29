@@ -53,6 +53,7 @@ apiRouter.post("/auth/reset-password", asyncHandler(authController.resetPassword
 
 apiRouter.get("/me", requireAuth, asyncHandler(usersController.me));
 apiRouter.patch("/me", requireAuth, asyncHandler(usersController.updateMe));
+apiRouter.get("/avatars/:userId", asyncHandler(usersController.avatar));
 apiRouter.post("/me/change-password", requireAuth, asyncHandler(usersController.changePassword));
 apiRouter.post("/me/closure-request", requireAuth, asyncHandler(usersController.closureRequest));
 apiRouter.get("/me/security", requireAuth, asyncHandler(securityController.get));
