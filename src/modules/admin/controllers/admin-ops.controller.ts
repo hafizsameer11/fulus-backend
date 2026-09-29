@@ -453,8 +453,8 @@ export class AdminOpsController {
         buyEnabled: true,
         sellEnabled: true,
         sendEnabled: true,
-        buySpreadBps: 100,
-        sellSpreadBps: 100,
+        buySpreadBps: 0,
+        sellSpreadBps: 0,
         minTradeUsd: 2,
         maxTradeUsd: 100_000,
       };

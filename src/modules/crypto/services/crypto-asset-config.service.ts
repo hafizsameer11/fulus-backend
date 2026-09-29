@@ -36,24 +36,25 @@ const DEFAULTS: Omit<CryptoAssetConfig, "code" | "updatedAt"> = {
   buyEnabled: true,
   sellEnabled: true,
   sendEnabled: true,
-  buySpreadBps: 100,
-  sellSpreadBps: 100,
+  /** 0 = pass-through Busha mid until admin publishes a spread. */
+  buySpreadBps: 0,
+  sellSpreadBps: 0,
   minTradeUsd: 2,
   maxTradeUsd: 100_000,
 };
 
-/** Demo-aligned defaults for known assets when no PlatformConfig row exists. */
+/** Soft seeds for listing flags / trade bands only — spreads stay 0 until published. */
 const SEED: Record<string, Partial<CryptoAssetConfig>> = {
-  BTC: { buySpreadBps: 120, sellSpreadBps: 140, minTradeUsd: 5, maxTradeUsd: 50_000 },
-  ETH: { buySpreadBps: 130, sellSpreadBps: 150, minTradeUsd: 5, maxTradeUsd: 40_000 },
-  USDT: { buySpreadBps: 60, sellSpreadBps: 70, minTradeUsd: 2, maxTradeUsd: 100_000 },
-  USDC: { buySpreadBps: 60, sellSpreadBps: 70, minTradeUsd: 2, maxTradeUsd: 100_000 },
-  SOL: { buySpreadBps: 160, sellSpreadBps: 180, minTradeUsd: 5, maxTradeUsd: 25_000 },
-  BNB: { buySpreadBps: 150, sellSpreadBps: 170, minTradeUsd: 5, maxTradeUsd: 20_000 },
-  XRP: { buySpreadBps: 180, sellSpreadBps: 200, minTradeUsd: 2, maxTradeUsd: 10_000, sendEnabled: false },
-  TRX: { buySpreadBps: 190, sellSpreadBps: 210, minTradeUsd: 2, maxTradeUsd: 8_000 },
-  DOGE: { enabled: false, buyEnabled: false, buySpreadBps: 220, sellSpreadBps: 240, minTradeUsd: 2, maxTradeUsd: 5_000, sendEnabled: false },
-  MATIC: { enabled: false, buyEnabled: false, sellEnabled: false, sendEnabled: false, buySpreadBps: 200, sellSpreadBps: 220 },
+  BTC: { minTradeUsd: 5, maxTradeUsd: 50_000 },
+  ETH: { minTradeUsd: 5, maxTradeUsd: 40_000 },
+  USDT: { minTradeUsd: 2, maxTradeUsd: 100_000 },
+  USDC: { minTradeUsd: 2, maxTradeUsd: 100_000 },
+  SOL: { minTradeUsd: 5, maxTradeUsd: 25_000 },
+  BNB: { minTradeUsd: 5, maxTradeUsd: 20_000 },
+  XRP: { minTradeUsd: 2, maxTradeUsd: 10_000, sendEnabled: false },
+  TRX: { minTradeUsd: 2, maxTradeUsd: 8_000 },
+  DOGE: { enabled: false, buyEnabled: false, minTradeUsd: 2, maxTradeUsd: 5_000, sendEnabled: false },
+  MATIC: { enabled: false, buyEnabled: false, sellEnabled: false, sendEnabled: false },
 };
 
 function configKey(code: string) {

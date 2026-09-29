@@ -406,8 +406,8 @@ export class CryptoService {
       return rows.map((r) => {
         const code = String(r.currency ?? "").toUpperCase();
         const cfg = byCode.get(code);
-        const buyBps = cfg?.buySpreadBps ?? 100;
-        const sellBps = cfg?.sellSpreadBps ?? 100;
+        const buyBps = cfg?.buySpreadBps ?? 0;
+        const sellBps = cfg?.sellSpreadBps ?? 0;
         const midNgn = Number(r.ngn ?? r.buyNgn ?? r.sellNgn ?? 0);
         const midUsd = Number(r.usd ?? 0);
         const bushaBuy = Number(r.buyNgn ?? midNgn);
