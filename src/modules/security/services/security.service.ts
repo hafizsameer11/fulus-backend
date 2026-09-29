@@ -64,7 +64,10 @@ export class SecurityService {
       data.transactionPinEnabled = true;
     }
     if (input.transactionPinEnabled !== undefined) {
-      if (input.transactionPinEnabled && !existing.transactionPinHash) {
+      // Same request may set the PIN hash above — don't require a prior hash.
+      const willHavePin =
+        Boolean(existing.transactionPinHash) || input.transactionPin !== undefined;
+      if (input.transactionPinEnabled && !willHavePin) {
         throw new AppError("Set a transaction PIN first", 400, "PIN_REQUIRED");
       }
       data.transactionPinEnabled = input.transactionPinEnabled;
