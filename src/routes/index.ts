@@ -24,6 +24,7 @@ import {
   adminSupportController,
 } from "../modules/admin/controllers/admin.controller.js";
 import { adminListController } from "../modules/admin/controllers/admin-list.controller.js";
+import { adminOpsController } from "../modules/admin/controllers/admin-ops.controller.js";
 import { sessionsController } from "../modules/sessions/controllers/sessions.controller.js";
 import { securityController } from "../modules/security/controllers/security.controller.js";
 import { referralsController } from "../modules/referrals/controllers/referrals.controller.js";
@@ -99,6 +100,26 @@ apiRouter.get("/admin/transactions/:id", requireAdmin, asyncHandler(adminListCon
 apiRouter.get("/admin/deposits", requireAdmin, asyncHandler(adminListController.listDeposits));
 apiRouter.get("/admin/payouts", requireAdmin, asyncHandler(adminListController.listPayouts));
 apiRouter.get("/admin/cards", requireAdmin, asyncHandler(adminListController.listCards));
+apiRouter.get("/admin/overview", requireAdmin, asyncHandler(adminOpsController.overview));
+apiRouter.get("/admin/swaps", requireAdmin, asyncHandler(adminOpsController.listSwaps));
+apiRouter.get("/admin/ledger", requireAdmin, asyncHandler(adminOpsController.listLedger));
+apiRouter.get("/admin/beneficiaries", requireAdmin, asyncHandler(adminOpsController.listBeneficiaries));
+apiRouter.get("/admin/virtual-accounts", requireAdmin, asyncHandler(adminOpsController.listVirtualAccounts));
+apiRouter.get("/admin/bill-services", requireAdmin, asyncHandler(adminOpsController.listBillServices));
+apiRouter.get("/admin/bill-payments", requireAdmin, asyncHandler(adminOpsController.listBillPayments));
+apiRouter.get("/admin/crypto/orders", requireAdmin, asyncHandler(adminOpsController.listCryptoOrders));
+apiRouter.get("/admin/crypto/addresses", requireAdmin, asyncHandler(adminOpsController.listCryptoAddresses));
+apiRouter.get("/admin/crypto/wallets", requireAdmin, asyncHandler(adminOpsController.listCryptoWallets));
+apiRouter.get("/admin/esims", requireAdmin, asyncHandler(adminOpsController.listEsims));
+apiRouter.get("/admin/esim-orders", requireAdmin, asyncHandler(adminOpsController.listEsimOrders));
+apiRouter.get("/admin/referrals", requireAdmin, asyncHandler(adminOpsController.listReferrals));
+apiRouter.get("/admin/webhooks", requireAdmin, asyncHandler(adminOpsController.listWebhooks));
+apiRouter.get("/admin/staff", requireAdmin, asyncHandler(adminOpsController.listStaff));
+apiRouter.get("/admin/closures", requireAdmin, asyncHandler(adminOpsController.listClosures));
+apiRouter.get("/admin/devices", requireAdmin, asyncHandler(adminOpsController.listDevices));
+apiRouter.get("/admin/platform-config", requireAdmin, asyncHandler(adminOpsController.listPlatformConfig));
+apiRouter.get("/admin/support/stats", requireAdmin, asyncHandler(adminOpsController.supportStats));
+apiRouter.get("/admin/revenue", requireAdmin, asyncHandler(adminOpsController.revenueSummary));
 apiRouter.get(
   "/admin/float",
   requireAdmin,
