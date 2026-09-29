@@ -6,6 +6,7 @@ import { makeReference } from "../../../lib/http.js";
 import { useBushaLive } from "../../../lib/simulate.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
+import { securityService } from "../../security/services/security.service.js";
 
 export const beneficiarySchema = z.object({
   type: z.enum(["BANK", "CRYPTO", "BILLER", "FULUS_USER"]),
@@ -34,6 +35,8 @@ export const fulusTransferSchema = z.object({
   amount: z.number().positive(),
   narration: z.string().optional(),
   idempotencyKey: z.string().optional(),
+  /** Required when the user has enabled a transaction PIN in security settings. */
+  transactionPin: z.string().regex(/^\d{4,6}$/).optional(),
 });
 
 /** What the beneficiary must receive (Busha net minimum is ₦499). */
@@ -52,6 +55,8 @@ export const bankTransferSchema = z.object({
   beneficiaryId: z.string().optional(),
   saveBeneficiary: z.boolean().optional(),
   idempotencyKey: z.string().optional(),
+  /** Required when the user has enabled a transaction PIN in security settings. */
+  transactionPin: z.string().regex(/^\d{4,6}$/).optional(),
 });
 
 export const bankQuoteSchema = z.object({
@@ -195,6 +200,7 @@ export class TransfersService {
 
   async transferFulus(userId: string, input: z.infer<typeof fulusTransferSchema>) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.TRANSFERS, "Transfers are temporarily disabled");
+    await securityService.assertTransactionPin(userId, input.transactionPin);
     if (!input.toUserId && !input.toEmail) throw new AppError("Provide toUserId or toEmail");
 
     if (input.idempotencyKey) {
@@ -319,6 +325,7 @@ export class TransfersService {
 
   async transferBank(userId: string, input: z.infer<typeof bankTransferSchema>) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.TRANSFERS, "Transfers are temporarily disabled");
+    await securityService.assertTransactionPin(userId, input.transactionPin);
     if (input.idempotencyKey) {
       const existing = await prisma.transaction.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) {

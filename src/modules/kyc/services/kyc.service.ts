@@ -3,9 +3,10 @@ import type { KycCheckType, Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { premblyClient } from "../../../providers/prembly/client.js";
 import { usePremblyLive } from "../../../lib/simulate.js";
-import { AppError } from "../../../lib/errors.js";
+import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
 import { bushaCustomerService } from "../../busha/services/busha-customer.service.js";
+import { readKycEvidenceBase64, saveKycEvidence } from "../../../lib/kyc-evidence.js";
 
 export const bvnSchema = z.object({
   number: z.string().regex(/^\d{11}$/, "BVN must be 11 digits"),
@@ -68,6 +69,36 @@ function extractPremblyReason(result: unknown, fallback: string): string {
 /**
  * Fire-and-forget background work. Errors are persisted on the KycCheck + inbox.
  */
+async function persistEvidence(
+  checkId: string,
+  kind: "selfie" | "document",
+  image?: string,
+): Promise<string | undefined> {
+  if (!image || image.length < 40) return undefined;
+  try {
+    return await saveKycEvidence(checkId, kind, image);
+  } catch (err) {
+    console.error(`[kyc:evidence] ${checkId}/${kind}`, err);
+    return undefined;
+  }
+}
+
+async function mergeEvidencePaths(checkId: string, paths: Record<string, string | undefined>) {
+  const check = await prisma.kycCheck.findUnique({ where: { id: checkId } });
+  if (!check) return;
+  const prev =
+    check.result && typeof check.result === "object" ? (check.result as Record<string, unknown>) : {};
+  const existing =
+    prev.evidencePaths && typeof prev.evidencePaths === "object"
+      ? (prev.evidencePaths as Record<string, string>)
+      : {};
+  const evidencePaths = { ...existing, ...Object.fromEntries(Object.entries(paths).filter(([, v]) => v)) };
+  await prisma.kycCheck.update({
+    where: { id: checkId },
+    data: { result: asJson({ ...prev, evidencePaths }) },
+  });
+}
+
 function runInBackground(label: string, work: () => Promise<void>) {
   setImmediate(() => {
     void work().catch((err) => {
@@ -188,6 +219,10 @@ export class KycService {
 
   private async processBvn(checkId: string, userId: string, input: z.infer<typeof bvnSchema>) {
     try {
+      if (input.image) {
+        const path = await persistEvidence(checkId, "selfie", input.image);
+        await mergeEvidencePaths(checkId, { selfie: path });
+      }
       const result = usePremblyLive()
         ? input.image
           ? await premblyClient.verifyBvnWithFace(input.number, input.image)
@@ -232,6 +267,8 @@ export class KycService {
 
   private async processNin(checkId: string, userId: string, input: z.infer<typeof ninSchema>) {
     try {
+      const selfiePath = await persistEvidence(checkId, "selfie", input.image);
+      await mergeEvidencePaths(checkId, { selfie: selfiePath });
       const result = usePremblyLive()
         ? await premblyClient.verifyNinWithFace(input.number, input.image, input.dateOfBirth)
         : {
@@ -310,6 +347,8 @@ export class KycService {
         await this.failCheck(checkId, userId, "ADDRESS", null, "Proof of address image is required");
         return;
       }
+      const docPath = await persistEvidence(checkId, "document", input.documentImage);
+      await mergeEvidencePaths(checkId, { document: docPath });
       // Never auto-pass ADDRESS — stay PENDING for admin review (compliance).
       const result = {
         provider: usePremblyLive() ? "prembly-deferred" : "manual-review",
@@ -360,6 +399,8 @@ export class KycService {
         await this.failCheck(checkId, userId, "FACE", null, "Upload a live selfie image");
         return;
       }
+      const selfiePath = await persistEvidence(checkId, "selfie", input.image);
+      await mergeEvidencePaths(checkId, { selfie: selfiePath });
 
       if (usePremblyLive()) {
         const bvnCheck = await prisma.kycCheck.findFirst({
@@ -446,6 +487,34 @@ export class KycService {
     });
     const updated = await prisma.kycCheck.findUniqueOrThrow({ where: { id: checkId } });
     return { check: updated };
+  }
+
+  async adminGetEvidence(checkId: string) {
+    const check = await prisma.kycCheck.findUnique({ where: { id: checkId } });
+    if (!check) throw new NotFoundError("KYC check not found");
+    const result =
+      check.result && typeof check.result === "object" ? (check.result as Record<string, unknown>) : {};
+    const paths =
+      result.evidencePaths && typeof result.evidencePaths === "object"
+        ? (result.evidencePaths as Record<string, string>)
+        : {};
+    const files: Array<{ kind: string; path: string; mime: string; base64: string }> = [];
+    for (const [kind, relPath] of Object.entries(paths)) {
+      if (!relPath) continue;
+      try {
+        const { mime, base64 } = await readKycEvidenceBase64(relPath);
+        files.push({ kind, path: relPath, mime, base64 });
+      } catch (err) {
+        console.error(`[kyc:evidence] read ${relPath}`, err);
+      }
+    }
+    return {
+      checkId: check.id,
+      type: check.type,
+      status: check.status,
+      evidencePaths: paths,
+      files,
+    };
   }
 
   async adminRejectCheck(checkId: string, reason: string, reviewer: string) {

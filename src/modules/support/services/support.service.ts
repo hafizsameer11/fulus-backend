@@ -11,6 +11,10 @@ export const postMessageSchema = z.object({
   body: z.string().min(1).max(4000),
 });
 
+export const adminReplySchema = z.object({
+  body: z.string().min(1).max(4000),
+});
+
 const TOPIC_REPLIES: Record<string, string> = {
   transfers: "Thanks — I can help with a transfer. Please share the reference number and the amount you sent.",
   cards: "Got it. Which card is affected (last 4 digits), and what did the decline message say?",
@@ -34,7 +38,7 @@ export class SupportService {
         messages: {
           create: [
             { senderRole: "USER", body: input.message },
-            { senderRole: "STAFF", body: autoReply(input.topic) },
+            { senderRole: "BOT", body: autoReply(input.topic) },
           ],
         },
       },
@@ -72,17 +76,51 @@ export class SupportService {
       data: { ticketId, senderRole: "USER", body: input.body },
     });
 
-    const staffMsg = await prisma.supportMessage.create({
+    await prisma.supportTicket.update({ where: { id: ticketId }, data: { updatedAt: new Date() } });
+
+    return { message: userMsg };
+  }
+
+  async adminListTickets(status?: string) {
+    const where =
+      status && ["OPEN", "CLOSED"].includes(status) ? { status: status as "OPEN" | "CLOSED" } : {};
+    return prisma.supportTicket.findMany({
+      where,
+      orderBy: { updatedAt: "desc" },
+      take: 100,
+      include: {
+        user: { select: { id: true, email: true, firstName: true, lastName: true, phone: true } },
+        messages: { orderBy: { createdAt: "desc" }, take: 1 },
+      },
+    });
+  }
+
+  async adminGetTicket(ticketId: string) {
+    const ticket = await prisma.supportTicket.findUnique({
+      where: { id: ticketId },
+      include: {
+        user: { select: { id: true, email: true, firstName: true, lastName: true, phone: true } },
+        messages: { orderBy: { createdAt: "asc" } },
+      },
+    });
+    if (!ticket) throw new NotFoundError("Ticket not found");
+    return ticket;
+  }
+
+  async adminReply(ticketId: string, input: z.infer<typeof adminReplySchema>, staffEmail: string) {
+    const ticket = await prisma.supportTicket.findUnique({ where: { id: ticketId } });
+    if (!ticket) throw new NotFoundError("Ticket not found");
+    if (ticket.status === "CLOSED") throw new AppError("Ticket is closed", 400, "TICKET_CLOSED");
+
+    const message = await prisma.supportMessage.create({
       data: {
         ticketId,
         senderRole: "STAFF",
-        body: "Thanks — a support agent will follow up shortly. Reference: " + ticket.id.slice(-8).toUpperCase(),
+        body: `[${staffEmail}] ${input.body}`,
       },
     });
-
     await prisma.supportTicket.update({ where: { id: ticketId }, data: { updatedAt: new Date() } });
-
-    return { messages: [userMsg, staffMsg] };
+    return { message };
   }
 }
 

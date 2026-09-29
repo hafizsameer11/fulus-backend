@@ -79,7 +79,11 @@ Admin FX desk key header: `x-admin-key` (default `fulus-admin-dev-key` / `ADMIN_
 - `GET /fx/rates` `POST /fx/quote` `POST /wallets/swap`
 - `GET|PUT /admin/fx/rates`
 - `POST /deposits/bank` `GET /wallets/deposit/bank/accounts`
-- `GET|POST /beneficiaries` `POST /transfers/fulus` `POST /transfers/bank`
+- `GET|POST /beneficiaries` `POST /transfers/fulus` `POST /transfers/bank` — optional JSON `transactionPin` (4–6 digits) when the user has enabled a PIN under `PATCH /me/security`
+- `POST /deposits/busha/ngn` — optional `purpose: "card_fund"`, `cardId`, `usdAmount` for card bank top-up (auto-funds card after settlement)
+- `GET /admin/kyc/checks/:id/evidence` — KYC images from disk (not stored in MySQL)
+- `GET /admin/support/tickets` `POST /admin/support/tickets/:id/reply`
+- `GET|PUT /admin/kill-switches` — includes `kill.cards_fund`, `kill.deposits`
 - `POST /kyc/bvn` `POST /kyc/nin`
 - `POST /cards` `POST /cards/:id/fund`
 - `GET /crypto/rates` `POST /crypto/orders`

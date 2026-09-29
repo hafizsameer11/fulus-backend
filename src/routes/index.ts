@@ -21,7 +21,9 @@ import {
   adminAuthController,
   adminKillSwitchController,
   adminKycController,
+  adminSupportController,
 } from "../modules/admin/controllers/admin.controller.js";
+import { adminListController } from "../modules/admin/controllers/admin-list.controller.js";
 import { sessionsController } from "../modules/sessions/controllers/sessions.controller.js";
 import { securityController } from "../modules/security/controllers/security.controller.js";
 import { referralsController } from "../modules/referrals/controllers/referrals.controller.js";
@@ -84,8 +86,19 @@ apiRouter.get("/admin/auth/me", requireAdmin, asyncHandler(adminAuthController.m
 apiRouter.get("/admin/kyc/checks", requireAdmin, asyncHandler(adminKycController.list));
 apiRouter.post("/admin/kyc/checks/:id/approve", requireAdmin, asyncHandler(adminKycController.approve));
 apiRouter.post("/admin/kyc/checks/:id/reject", requireAdmin, asyncHandler(adminKycController.reject));
+apiRouter.get("/admin/kyc/checks/:id/evidence", requireAdmin, asyncHandler(adminKycController.evidence));
 apiRouter.get("/admin/kill-switches", requireAdmin, asyncHandler(adminKillSwitchController.list));
 apiRouter.put("/admin/kill-switches", requireAdmin, asyncHandler(adminKillSwitchController.put));
+apiRouter.get("/admin/support/tickets", requireAdmin, asyncHandler(adminSupportController.list));
+apiRouter.get("/admin/support/tickets/:id", requireAdmin, asyncHandler(adminSupportController.get));
+apiRouter.post("/admin/support/tickets/:id/reply", requireAdmin, asyncHandler(adminSupportController.reply));
+apiRouter.get("/admin/users", requireAdmin, asyncHandler(adminListController.listUsers));
+apiRouter.get("/admin/users/:id", requireAdmin, asyncHandler(adminListController.getUser));
+apiRouter.get("/admin/transactions", requireAdmin, asyncHandler(adminListController.listTransactions));
+apiRouter.get("/admin/transactions/:id", requireAdmin, asyncHandler(adminListController.getTransaction));
+apiRouter.get("/admin/deposits", requireAdmin, asyncHandler(adminListController.listDeposits));
+apiRouter.get("/admin/payouts", requireAdmin, asyncHandler(adminListController.listPayouts));
+apiRouter.get("/admin/cards", requireAdmin, asyncHandler(adminListController.listCards));
 
 apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));

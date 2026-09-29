@@ -10,6 +10,7 @@ import { fxService } from "../../fx/services/fx.service.js";
 import { flutterwaveClient, flutterwaveLive } from "../../../providers/flutterwave/client.js";
 import { bushaFloatService } from "../../../providers/busha/float.js";
 import { simulateProviders, useBushaLive } from "../../../lib/simulate.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 
 /** Card processing fee shown in the deposit UI (1.5%). */
 export const CARD_FEE_BPS = 150;
@@ -19,9 +20,27 @@ export const createDepositSchema = z.object({
   amount: z.number().positive().max(5_000_000),
 });
 
-export const bushaNgnDepositSchema = z.object({
-  amount: z.number().positive().min(100).max(5_000_000),
-});
+export const bushaNgnDepositSchema = z
+  .object({
+    amount: z.number().positive().min(100).max(5_000_000),
+    /** When `card_fund`, deposit settlement auto-loads the card after NGN credit. */
+    purpose: z.enum(["wallet", "card_fund"]).optional(),
+    cardId: z.string().min(1).optional(),
+    usdAmount: z.number().positive().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.purpose !== "card_fund") return;
+    if (!val.cardId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "cardId is required for card top-up", path: ["cardId"] });
+    }
+    if (!val.usdAmount) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "usdAmount is required for card top-up",
+        path: ["usdAmount"],
+      });
+    }
+  });
 
 export const initiateCardDepositSchema = z.object({
   /** Amount the user intends to convert into the wallet (before card fee). */
@@ -510,6 +529,7 @@ button:active{opacity:.85}button:disabled{opacity:.5}
    * Fulus credits the user ledger when the transfer webhook confirms (net of fees).
    */
   async initiateBushaNgnDeposit(userId: string, input: z.infer<typeof bushaNgnDepositSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.DEPOSITS, "Deposits are temporarily disabled");
     const master = await bushaFloatService.createMasterNgnDeposit(input.amount);
     const deposit = await prisma.deposit.create({
       data: {
@@ -539,6 +559,13 @@ button:active{opacity:.85}button:disabled{opacity:.5}
           targetAmount: master.targetAmount,
           feeAmount: master.feeAmount,
           raw: master.raw,
+          ...(input.purpose === "card_fund"
+            ? {
+                purpose: "card_fund",
+                cardId: input.cardId,
+                usdAmount: input.usdAmount,
+              }
+            : {}),
         }),
       },
     });
@@ -617,7 +644,77 @@ button:active{opacity:.85}button:disabled{opacity:.5}
       body: `₦${creditAmount.toLocaleString()} was added to your NGN wallet.`,
     });
 
-    return { deposit: updated, transaction, alreadySettled: false };
+    let cardFund: unknown = null;
+    if (
+      meta.purpose === "card_fund" &&
+      meta.cardId &&
+      meta.usdAmount &&
+      !meta.cardFundSettled
+    ) {
+      cardFund = await this.settleCardFundAfterDeposit({
+        depositId: deposit.id,
+        userId: deposit.userId,
+        cardId: String(meta.cardId),
+        usdAmount: Number(meta.usdAmount),
+        ngnCredit: creditAmount,
+      });
+    }
+
+    return { deposit: updated, transaction, alreadySettled: false, cardFund };
+  }
+
+  /** Swap NGN → USD and fund card after a card top-up bank deposit settles. */
+  private async settleCardFundAfterDeposit(opts: {
+    depositId: string;
+    userId: string;
+    cardId: string;
+    usdAmount: number;
+    ngnCredit: number;
+  }) {
+    const { cardsService } = await import("../../cards/services/cards.service.js");
+    try {
+      await fxService.executeSwap(opts.userId, {
+        fromCurrency: "NGN",
+        toCurrency: "USD",
+        amount: opts.ngnCredit,
+        idempotencyKey: `card-fund-swap-${opts.depositId}`,
+      });
+      const funded = await cardsService.fund(opts.userId, opts.cardId, {
+        amount: opts.usdAmount,
+        currency: "USD",
+      });
+      const deposit = await prisma.deposit.findUnique({ where: { id: opts.depositId } });
+      const meta = asRecord(deposit?.metadata);
+      await prisma.deposit.update({
+        where: { id: opts.depositId },
+        data: {
+          metadata: asJson({
+            ...meta,
+            cardFundSettled: true,
+            cardFundSettledAt: new Date().toISOString(),
+          }),
+        },
+      });
+      await createInboxMessage({
+        userId: opts.userId,
+        category: "cards",
+        title: "Card topped up",
+        body: `$${opts.usdAmount.toFixed(2)} was loaded onto your card after your bank transfer cleared.`,
+      });
+      return funded;
+    } catch (err) {
+      console.error("[deposits] card fund after bank deposit failed", err);
+      await createInboxMessage({
+        userId: opts.userId,
+        category: "cards",
+        title: "Card top-up needs attention",
+        body:
+          err instanceof Error
+            ? `Your deposit cleared but card funding failed: ${err.message}. Fund from your wallet or contact support.`
+            : "Your deposit cleared but card funding failed. Fund from your wallet or contact support.",
+      });
+      return { error: err instanceof Error ? err.message : "card_fund_failed" };
+    }
   }
 
   /** Dev/sim: mark a pending Busha master deposit paid without a real bank transfer. */

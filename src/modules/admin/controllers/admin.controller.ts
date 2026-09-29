@@ -7,6 +7,7 @@ import { signAdminToken } from "../../../middleware/admin.js";
 import { prisma } from "../../../lib/prisma.js";
 import { kycService } from "../../kyc/services/kyc.service.js";
 import { killSwitchService, putKillSwitchesSchema } from "../services/kill-switch.service.js";
+import { adminReplySchema, supportService } from "../../support/services/support.service.js";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -78,6 +79,32 @@ export class AdminKycController {
     const body = z.object({ reason: z.string().min(3).max(500).default("Rejected by compliance") }).parse(req.body ?? {});
     return ok(res, await kycService.adminRejectCheck(id, body.reason, req.admin?.email ?? "admin"));
   };
+
+  evidence = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    return ok(res, await kycService.adminGetEvidence(id));
+  };
+}
+
+export class AdminSupportController {
+  list = async (req: Request, res: Response) => {
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    return ok(res, { tickets: await supportService.adminListTickets(status) });
+  };
+
+  get = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    return ok(res, await supportService.adminGetTicket(id));
+  };
+
+  reply = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = adminReplySchema.parse(req.body ?? {});
+    return ok(
+      res,
+      await supportService.adminReply(id, body, req.admin?.email ?? "admin"),
+    );
+  };
 }
 
 export class AdminKillSwitchController {
@@ -90,3 +117,4 @@ export class AdminKillSwitchController {
 export const adminAuthController = new AdminAuthController();
 export const adminKycController = new AdminKycController();
 export const adminKillSwitchController = new AdminKillSwitchController();
+export const adminSupportController = new AdminSupportController();

@@ -16,6 +16,7 @@ import { walletService } from "../../wallet/services/wallet.service.js";
 import { fxService } from "../../fx/services/fx.service.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
 import { simLast4, simRef, usePagocardsLive } from "../../../lib/simulate.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 
 export const createCardSchema = z.object({
   label: z.string().min(1).max(40).optional(),
@@ -506,6 +507,7 @@ export class CardsService {
   }
 
   async fund(userId: string, cardId: string, input: z.infer<typeof fundCardSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.CARDS_FUND, "Card funding is temporarily disabled");
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready for funding");
 

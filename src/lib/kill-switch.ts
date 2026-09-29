@@ -4,6 +4,8 @@ import { AppError } from "./errors.js";
 export const KILL_SWITCH_KEYS = {
   TRANSFERS: "kill.transfers",
   CRYPTO_SEND: "kill.crypto_send",
+  CARDS_FUND: "kill.cards_fund",
+  DEPOSITS: "kill.deposits",
 } as const;
 
 const cache = new Map<string, { value: boolean; expiresAt: number }>();

@@ -103,6 +103,19 @@ export class SecurityService {
     };
   }
 
+  /** When PIN is enabled, `transactionPin` (4–6 digits) is required on bank/Fulus transfers. */
+  async assertTransactionPin(userId: string, transactionPin?: string) {
+    const row = await ensureSettings(userId);
+    if (!row.transactionPinEnabled || !row.transactionPinHash) return;
+    if (!transactionPin) {
+      throw new AppError("Transaction PIN required", 401, "PIN_REQUIRED");
+    }
+    const valid = await bcrypt.compare(transactionPin, row.transactionPinHash);
+    if (!valid) {
+      throw new AppError("Invalid transaction PIN", 403, "PIN_INVALID");
+    }
+  }
+
   async assertCryptoSendAllowed(userId: string, address: string) {
     const row = await ensureSettings(userId);
 
