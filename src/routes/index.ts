@@ -107,8 +107,11 @@ apiRouter.get("/admin/ledger", requireAdmin, asyncHandler(adminOpsController.lis
 apiRouter.get("/admin/beneficiaries", requireAdmin, asyncHandler(adminOpsController.listBeneficiaries));
 apiRouter.get("/admin/virtual-accounts", requireAdmin, asyncHandler(adminOpsController.listVirtualAccounts));
 apiRouter.get("/admin/bill-services", requireAdmin, asyncHandler(adminOpsController.listBillServices));
+apiRouter.get("/admin/bill-products", requireAdmin, asyncHandler(adminOpsController.listBillProducts));
 apiRouter.get("/admin/bill-payments", requireAdmin, asyncHandler(adminOpsController.listBillPayments));
+apiRouter.get("/admin/bill-payments/:id", requireAdmin, asyncHandler(adminOpsController.getBillPayment));
 apiRouter.get("/admin/crypto/orders", requireAdmin, asyncHandler(adminOpsController.listCryptoOrders));
+apiRouter.get("/admin/crypto/orders/:id", requireAdmin, asyncHandler(adminOpsController.getCryptoOrder));
 apiRouter.get("/admin/crypto/addresses", requireAdmin, asyncHandler(adminOpsController.listCryptoAddresses));
 apiRouter.get("/admin/crypto/wallets", requireAdmin, asyncHandler(adminOpsController.listCryptoWallets));
 apiRouter.get("/admin/esims", requireAdmin, asyncHandler(adminOpsController.listEsims));
@@ -117,8 +120,11 @@ apiRouter.get("/admin/referrals", requireAdmin, asyncHandler(adminOpsController.
 apiRouter.get("/admin/webhooks", requireAdmin, asyncHandler(adminOpsController.listWebhooks));
 apiRouter.get("/admin/staff", requireAdmin, asyncHandler(adminOpsController.listStaff));
 apiRouter.get("/admin/closures", requireAdmin, asyncHandler(adminOpsController.listClosures));
+apiRouter.patch("/admin/closures/:id", requireAdmin, asyncHandler(adminOpsController.updateClosure));
 apiRouter.get("/admin/devices", requireAdmin, asyncHandler(adminOpsController.listDevices));
+apiRouter.post("/admin/devices/:id/revoke", requireAdmin, asyncHandler(adminOpsController.revokeDevice));
 apiRouter.get("/admin/platform-config", requireAdmin, asyncHandler(adminOpsController.listPlatformConfig));
+apiRouter.put("/admin/platform-config", requireAdmin, asyncHandler(adminOpsController.upsertPlatformConfig));
 apiRouter.get("/admin/support/stats", requireAdmin, asyncHandler(adminOpsController.supportStats));
 apiRouter.get("/admin/revenue", requireAdmin, asyncHandler(adminOpsController.revenueSummary));
 apiRouter.get(

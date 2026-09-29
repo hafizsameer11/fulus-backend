@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { ok } from "../../../lib/http.js";
+import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { prisma } from "../../../lib/prisma.js";
 import { parsePagination } from "../lib/pagination.js";
 
@@ -180,13 +181,111 @@ export class AdminOpsController {
   listBillServices = async (_req: Request, res: Response) => {
     const services = await prisma.billService.findMany({
       orderBy: [{ category: "asc" }, { name: "asc" }],
-      include: { _count: { select: { variations: true } } },
+      include: {
+        variations: { orderBy: { name: "asc" } },
+        _count: { select: { variations: true } },
+      },
     });
     return ok(res, {
-      services: services.map(({ _count, ...s }) => ({
+      services: services.map(({ _count, variations, isActive, ...s }) => ({
         ...s,
+        active: isActive,
         variationsCount: _count.variations,
+        variations: variations.map((v) => ({
+          id: v.id,
+          code: v.code,
+          name: v.name,
+          amount: v.amount != null ? Number(v.amount) : null,
+          isActive: v.isActive,
+        })),
       })),
+    });
+  };
+
+  listBillProducts = async (_req: Request, res: Response) => {
+    const variations = await prisma.billVariation.findMany({
+      orderBy: [{ serviceId: "asc" }, { name: "asc" }],
+      include: { service: { select: { id: true, name: true, category: true, provider: true, isActive: true } } },
+    });
+    return ok(res, {
+      products: variations.map(({ service, ...v }) => ({
+        id: v.id,
+        code: v.code,
+        name: v.name,
+        amount: v.amount != null ? Number(v.amount) : null,
+        isActive: v.isActive,
+        serviceId: service.id,
+        serviceName: service.name,
+        category: service.category,
+        provider: service.provider,
+        serviceActive: service.isActive,
+        createdAt: v.createdAt,
+      })),
+    });
+  };
+
+  getBillPayment = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const payment = await prisma.billPayment.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
+    });
+    if (!payment) throw new NotFoundError("Bill payment not found");
+    const service = await prisma.billService.findUnique({ where: { id: payment.serviceId } });
+    const { user, ...p } = payment;
+    return ok(res, {
+      payment: {
+        id: p.id,
+        userId: p.userId,
+        userEmail: user.email,
+        userName: userDisplayName(user),
+        serviceId: p.serviceId,
+        serviceName: service?.name ?? null,
+        category: p.category,
+        provider: p.provider,
+        customerRef: p.customerRef,
+        variationCode: p.variationCode,
+        amount: Number(p.amount),
+        phone: p.phone,
+        status: p.status,
+        providerRef: p.providerRef,
+        token: p.token,
+        providerPayload: p.providerPayload,
+        transactionId: p.transactionId,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+      },
+    });
+  };
+
+  getCryptoOrder = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const order = await prisma.cryptoOrder.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
+    });
+    if (!order) throw new NotFoundError("Crypto order not found");
+    const { user, ...o } = order;
+    return ok(res, {
+      order: {
+        id: o.id,
+        userId: o.userId,
+        userEmail: user.email,
+        userName: userDisplayName(user),
+        side: o.side,
+        baseCurrency: o.baseCurrency,
+        quoteCurrency: o.quoteCurrency,
+        amount: Number(o.amount),
+        quoteAmount: o.quoteAmount != null ? Number(o.quoteAmount) : null,
+        rate: o.rate != null ? Number(o.rate) : null,
+        network: o.network,
+        status: o.status,
+        provider: o.provider,
+        providerRef: o.providerRef,
+        transactionId: o.transactionId,
+        createdAt: o.createdAt,
+        updatedAt: o.updatedAt,
+      },
     });
   };
 
@@ -526,6 +625,57 @@ export class AdminOpsController {
         value: r.value,
         updatedAt: r.updatedAt,
       })),
+    });
+  };
+
+  upsertPlatformConfig = async (req: Request, res: Response) => {
+    const key = typeof req.body?.key === "string" ? req.body.key.trim() : "";
+    const value = typeof req.body?.value === "string" ? req.body.value : req.body?.value != null ? String(req.body.value) : "";
+    if (!key) throw new AppError("key is required", 400, "BAD_REQUEST");
+    const row = await prisma.platformConfig.upsert({
+      where: { key },
+      create: { key, value },
+      update: { value },
+    });
+    return ok(res, { key: row.key, value: row.value, updatedAt: row.updatedAt });
+  };
+
+  updateClosure = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const status = String(req.body?.status ?? "").toUpperCase();
+    if (status !== "PROCESSED" && status !== "CANCELLED" && status !== "PENDING") {
+      throw new AppError("status must be PENDING, PROCESSED, or CANCELLED", 400, "BAD_REQUEST");
+    }
+    const existing = await prisma.closureRequest.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError("Closure request not found");
+    const updated = await prisma.closureRequest.update({
+      where: { id },
+      data: { status: status as "PENDING" | "PROCESSED" | "CANCELLED" },
+      include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
+    });
+    const { user, ...r } = updated;
+    return ok(res, {
+      request: {
+        ...r,
+        userEmail: user.email,
+        userName: userDisplayName(user),
+      },
+    });
+  };
+
+  revokeDevice = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const token = await prisma.refreshToken.findUnique({ where: { id } });
+    if (!token) throw new NotFoundError("Device session not found");
+    const updated = await prisma.refreshToken.update({
+      where: { id },
+      data: { revokedAt: new Date() },
+    });
+    return ok(res, {
+      device: {
+        id: updated.id,
+        revokedAt: updated.revokedAt,
+      },
     });
   };
 
