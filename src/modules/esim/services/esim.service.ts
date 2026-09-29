@@ -731,14 +731,21 @@ export class EsimService {
 
   async purchase(userId: string, input: z.infer<typeof purchaseSchema>) {
     const catalogBundle = await this.resolveBundle(input.bundleName);
-    let usdAmount = pickChargeAmount(catalogBundle?.price, input.amount);
+    if (!catalogBundle) {
+      throw new AppError("Unknown eSIM bundle — refresh the catalogue and try again", 400, "UNKNOWN_BUNDLE");
+    }
+    let usdAmount = Number(catalogBundle.price);
+    if (!Number.isFinite(usdAmount) || usdAmount <= 0) {
+      throw new AppError("Catalogue price missing for this bundle", 400, "INVALID_PRICE");
+    }
 
     if (useEsimGoLive()) {
       const validation = (await esimGoClient.validateOrder({
         item: input.bundleName,
         quantity: input.quantity,
       })) as Record<string, unknown>;
-      usdAmount = pickChargeAmount(validation.total ?? validation.price, usdAmount);
+      const validated = Number(validation.total ?? validation.price);
+      if (Number.isFinite(validated) && validated > 0) usdAmount = validated;
     }
 
     const dataMb = catalogBundle?.unlimited
@@ -952,11 +959,17 @@ export class EsimService {
   async topup(userId: string, id: string, input: z.infer<typeof topupSchema>) {
     const esim = await this.get(userId, id);
     const catalogBundle = await this.resolveBundle(input.bundleName);
-    let usdAmount = pickChargeAmount(catalogBundle?.price, input.amount);
+    if (!catalogBundle) {
+      throw new AppError("Unknown eSIM bundle — refresh the catalogue and try again", 400, "UNKNOWN_BUNDLE");
+    }
+    let usdAmount = Number(catalogBundle.price);
+    if (!Number.isFinite(usdAmount) || usdAmount <= 0) {
+      throw new AppError("Catalogue price missing for this bundle", 400, "INVALID_PRICE");
+    }
     const addMb =
       input.dataMb ??
-      (catalogBundle?.unlimited ? 0 : catalogBundle?.dataMb && catalogBundle.dataMb > 0 ? catalogBundle.dataMb : 1024);
-    const days = catalogBundle?.days && catalogBundle.days > 0 ? catalogBundle.days : 14;
+      (catalogBundle.unlimited ? 0 : catalogBundle.dataMb && catalogBundle.dataMb > 0 ? catalogBundle.dataMb : 1024);
+    const days = catalogBundle.days && catalogBundle.days > 0 ? catalogBundle.days : 14;
 
     if (useEsimGoLive()) {
       if (!esim.iccid) throw new AppError("eSIM has no ICCID yet — wait until assignment completes");
@@ -964,7 +977,8 @@ export class EsimService {
         item: input.bundleName,
         quantity: 1,
       })) as Record<string, unknown>;
-      usdAmount = pickChargeAmount(validation.total ?? validation.price, usdAmount);
+      const validated = Number(validation.total ?? validation.price);
+      if (Number.isFinite(validated) && validated > 0) usdAmount = validated;
     }
 
     const pay = await resolveEsimDebit(userId, usdAmount, input.currency);
