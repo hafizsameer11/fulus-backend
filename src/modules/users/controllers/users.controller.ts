@@ -1,7 +1,12 @@
 import type { Request, Response } from "express";
 import { ok } from "../../../lib/http.js";
 import { UnauthorizedError } from "../../../lib/errors.js";
-import { changePasswordSchema, updateProfileSchema, usersService } from "../services/users.service.js";
+import {
+  changePasswordSchema,
+  closureRequestSchema,
+  updateProfileSchema,
+  usersService,
+} from "../services/users.service.js";
 
 export class UsersController {
   me = async (req: Request, res: Response) => {
@@ -27,6 +32,11 @@ export class UsersController {
   markInboxRead = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();
     return ok(res, await usersService.markInboxRead(req.user.id, String(req.params.id)));
+  };
+
+  closureRequest = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await usersService.requestClosure(req.user.id, closureRequestSchema.parse(req.body)));
   };
 }
 

@@ -126,6 +126,23 @@ enum EmailOtpPurpose {
   RESET
 }
 
+enum ClosureRequestStatus {
+  PENDING
+  PROCESSED
+  CANCELLED
+}
+
+enum ReferralAttributionStatus {
+  PENDING
+  QUALIFIED
+  REWARDED
+}
+
+enum SupportTicketStatus {
+  OPEN
+  CLOSED
+}
+
 model User {
   id                   String     @id @default(cuid())
   email                String     @unique
@@ -144,10 +161,19 @@ model User {
   kycStatus            KycStatus  @default(NOT_STARTED)
   kycTier              Int        @default(0)
   emailVerifiedAt      DateTime?
+  /// Bumped on revoke-all sessions to invalidate outstanding JWTs
+  tokenVersion         Int        @default(0)
+  /// Shareable invite code (generated at signup)
+  referralCode         String?    @unique
   createdAt            DateTime   @default(now())
   updatedAt            DateTime   @updatedAt
 
-  wallets         Wallet[]
+  wallets              Wallet[]
+  securitySettings     UserSecuritySettings?
+  closureRequests      ClosureRequest[]
+  referralsSent        ReferralAttribution[] @relation("Referrer")
+  referralReceived     ReferralAttribution?  @relation("Referred")
+  supportTickets       SupportTicket[]
   kycChecks       KycCheck[]
   cards           Card[]
   transactions    Transaction[]
@@ -182,16 +208,94 @@ model EmailOtp {
 }
 
 model RefreshToken {
-  id        String    @id @default(cuid())
-  userId    String
-  tokenHash String    @unique
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime  @default(now())
+  id          String    @id @default(cuid())
+  userId      String
+  tokenHash   String    @unique
+  deviceLabel String?
+  userAgent   String?   @db.Text
+  lastSeenAt  DateTime  @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model UserSecuritySettings {
+  userId                    String    @id
+  transactionPinHash        String?
+  transactionPinEnabled     Boolean   @default(false)
+  biometricEnabled          Boolean   @default(false)
+  cryptoWhitelistOnly       Boolean   @default(false)
+  cryptoWithdrawalLockHours Int       @default(0)
+  cryptoAntiPhishingCode    String?
+  cryptoSecurityUpdatedAt   DateTime?
+  updatedAt                 DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ClosureRequest {
+  id        String               @id @default(cuid())
+  userId    String
+  reason    String               @db.Text
+  status    ClosureRequestStatus @default(PENDING)
+  createdAt DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model ReferralAttribution {
+  id             String                    @id @default(cuid())
+  referrerUserId String
+  referredUserId String                    @unique
+  code           String
+  rewardAmount   Decimal                   @db.Decimal(24, 8)
+  status         ReferralAttributionStatus @default(PENDING)
+  createdAt      DateTime                  @default(now())
+
+  referrer User @relation("Referrer", fields: [referrerUserId], references: [id], onDelete: Cascade)
+  referred User @relation("Referred", fields: [referredUserId], references: [id], onDelete: Cascade)
+
+  @@index([referrerUserId, createdAt])
+  @@index([code])
+}
+
+model SupportTicket {
+  id        String              @id @default(cuid())
+  userId    String
+  topic     String
+  status    SupportTicketStatus @default(OPEN)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages SupportMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model SupportMessage {
+  id         String   @id @default(cuid())
+  ticketId   String
+  senderRole String
+  body       String   @db.Text
+  createdAt  DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+}
+
+model PlatformConfig {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
 }
 
 model Wallet {

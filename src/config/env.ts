@@ -8,6 +8,8 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16),
   JWT_EXPIRES_IN: z.string().default("7d"),
+  /** NGN reward shown for referral program (single flat amount). */
+  REFERRAL_REWARD_NGN: z.coerce.number().default(500),
   /** Shared machine key for scripts; never use the default in production. */
   ADMIN_API_KEY: z.string().optional().default("fulus-admin-dev-key"),
   /** Bootstrap staff login (email/password). No Google/TOTP 2FA. */

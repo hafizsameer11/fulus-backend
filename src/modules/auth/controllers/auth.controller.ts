@@ -13,13 +13,13 @@ import {
 export class AuthController {
   register = async (req: Request, res: Response) => {
     const input = registerSchema.parse(req.body);
-    const result = await authService.register(input);
+    const result = await authService.register(input, req);
     return created(res, result);
   };
 
   login = async (req: Request, res: Response) => {
     const input = loginSchema.parse(req.body);
-    const result = await authService.login(input);
+    const result = await authService.login(input, req);
     return ok(res, result);
   };
 
@@ -28,7 +28,7 @@ export class AuthController {
   };
 
   verifyOtp = async (req: Request, res: Response) => {
-    return ok(res, await authService.verifyOtp(verifyOtpSchema.parse(req.body)));
+    return ok(res, await authService.verifyOtp(verifyOtpSchema.parse(req.body), req));
   };
 
   resendOtp = async (req: Request, res: Response) => {

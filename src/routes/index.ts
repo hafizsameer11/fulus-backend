@@ -17,7 +17,15 @@ import { transfersController } from "../modules/transfers/controllers/transfers.
 import { floatJobsService } from "../modules/float/services/float-jobs.service.js";
 import { simulateProviders } from "../lib/simulate.js";
 import { ok } from "../lib/http.js";
-import { adminAuthController, adminKycController } from "../modules/admin/controllers/admin.controller.js";
+import {
+  adminAuthController,
+  adminKillSwitchController,
+  adminKycController,
+} from "../modules/admin/controllers/admin.controller.js";
+import { sessionsController } from "../modules/sessions/controllers/sessions.controller.js";
+import { securityController } from "../modules/security/controllers/security.controller.js";
+import { referralsController } from "../modules/referrals/controllers/referrals.controller.js";
+import { supportController } from "../modules/support/controllers/support.controller.js";
 
 export const apiRouter = Router();
 
@@ -43,6 +51,18 @@ apiRouter.post("/auth/reset-password", asyncHandler(authController.resetPassword
 apiRouter.get("/me", requireAuth, asyncHandler(usersController.me));
 apiRouter.patch("/me", requireAuth, asyncHandler(usersController.updateMe));
 apiRouter.post("/me/change-password", requireAuth, asyncHandler(usersController.changePassword));
+apiRouter.post("/me/closure-request", requireAuth, asyncHandler(usersController.closureRequest));
+apiRouter.get("/me/security", requireAuth, asyncHandler(securityController.get));
+apiRouter.patch("/me/security", requireAuth, asyncHandler(securityController.patch));
+apiRouter.get("/sessions", requireAuth, asyncHandler(sessionsController.list));
+apiRouter.post("/sessions/revoke-all", requireAuth, asyncHandler(sessionsController.revokeAll));
+apiRouter.post("/sessions/revoke-current", requireAuth, asyncHandler(sessionsController.revokeCurrent));
+apiRouter.post("/sessions/:id/revoke", requireAuth, asyncHandler(sessionsController.revoke));
+apiRouter.get("/referrals/me", requireAuth, asyncHandler(referralsController.me));
+apiRouter.post("/support/tickets", requireAuth, asyncHandler(supportController.create));
+apiRouter.get("/support/tickets", requireAuth, asyncHandler(supportController.list));
+apiRouter.get("/support/tickets/:id", requireAuth, asyncHandler(supportController.get));
+apiRouter.post("/support/tickets/:id/messages", requireAuth, asyncHandler(supportController.message));
 apiRouter.get("/inbox", requireAuth, asyncHandler(usersController.inbox));
 apiRouter.post("/inbox/:id/read", requireAuth, asyncHandler(usersController.markInboxRead));
 
@@ -64,6 +84,8 @@ apiRouter.get("/admin/auth/me", requireAdmin, asyncHandler(adminAuthController.m
 apiRouter.get("/admin/kyc/checks", requireAdmin, asyncHandler(adminKycController.list));
 apiRouter.post("/admin/kyc/checks/:id/approve", requireAdmin, asyncHandler(adminKycController.approve));
 apiRouter.post("/admin/kyc/checks/:id/reject", requireAdmin, asyncHandler(adminKycController.reject));
+apiRouter.get("/admin/kill-switches", requireAdmin, asyncHandler(adminKillSwitchController.list));
+apiRouter.put("/admin/kill-switches", requireAdmin, asyncHandler(adminKillSwitchController.put));
 
 apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));

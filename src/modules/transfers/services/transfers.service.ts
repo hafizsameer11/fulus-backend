@@ -5,6 +5,7 @@ import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors
 import { makeReference } from "../../../lib/http.js";
 import { useBushaLive } from "../../../lib/simulate.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 
 export const beneficiarySchema = z.object({
   type: z.enum(["BANK", "CRYPTO", "BILLER", "FULUS_USER"]),
@@ -193,6 +194,7 @@ export class TransfersService {
   }
 
   async transferFulus(userId: string, input: z.infer<typeof fulusTransferSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.TRANSFERS, "Transfers are temporarily disabled");
     if (!input.toUserId && !input.toEmail) throw new AppError("Provide toUserId or toEmail");
 
     if (input.idempotencyKey) {
@@ -316,6 +318,7 @@ export class TransfersService {
   }
 
   async transferBank(userId: string, input: z.infer<typeof bankTransferSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.TRANSFERS, "Transfers are temporarily disabled");
     if (input.idempotencyKey) {
       const existing = await prisma.transaction.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) {

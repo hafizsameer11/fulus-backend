@@ -6,6 +6,7 @@ import { ok } from "../../../lib/http.js";
 import { signAdminToken } from "../../../middleware/admin.js";
 import { prisma } from "../../../lib/prisma.js";
 import { kycService } from "../../kyc/services/kyc.service.js";
+import { killSwitchService, putKillSwitchesSchema } from "../services/kill-switch.service.js";
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -84,5 +85,13 @@ export class AdminKycController {
   };
 }
 
+export class AdminKillSwitchController {
+  list = async (_req: Request, res: Response) => ok(res, await killSwitchService.list());
+
+  put = async (req: Request, res: Response) =>
+    ok(res, await killSwitchService.upsert(putKillSwitchesSchema.parse(req.body ?? {})));
+}
+
 export const adminAuthController = new AdminAuthController();
 export const adminKycController = new AdminKycController();
+export const adminKillSwitchController = new AdminKillSwitchController();

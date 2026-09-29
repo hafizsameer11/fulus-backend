@@ -5,6 +5,9 @@ import { EmailOtpPurpose, WalletCurrency } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, ConflictError } from "../../../lib/errors.js";
 import { signAccessToken } from "../../../middleware/auth.js";
+import { sessionsService } from "../../sessions/services/sessions.service.js";
+import { referralsService, generateReferralCode } from "../../referrals/services/referrals.service.js";
+import type { Request } from "express";
 import { emailConfigured, otpEmailContent, sendEmail } from "../../../lib/mailer.js";
 import { env } from "../../../config/env.js";
 
@@ -14,6 +17,7 @@ export const registerSchema = z.object({
   firstName: z.string().min(1).optional(),
   lastName: z.string().min(1).optional(),
   phone: z.string().min(8).optional(),
+  referralCode: z.string().min(3).max(32).optional(),
 });
 
 export const loginSchema = z.object({
@@ -75,6 +79,21 @@ function publicUser<T extends Record<string, unknown>>(user: T) {
 }
 
 export class AuthService {
+  private async authTokens(userId: string, email: string, req: Request) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { tokenVersion: true },
+    });
+    const session = await sessionsService.createSession(userId, req);
+    const accessToken = signAccessToken({
+      id: userId,
+      email,
+      sessionId: session.sessionId,
+      tokenVersion: user?.tokenVersion ?? 0,
+    });
+    return { accessToken, sessionId: session.sessionId, refreshToken: session.refreshToken };
+  }
+
   private async issueOtp(email: string, purpose: EmailOtpPurpose) {
     const code = makeOtpCode();
     const codeHash = hashOtp(code);
@@ -147,7 +166,7 @@ export class AuthService {
     return row;
   }
 
-  async register(input: z.infer<typeof registerSchema>) {
+  async register(input: z.infer<typeof registerSchema>, req: Request) {
     const email = input.email.toLowerCase();
     const existing = await prisma.user.findUnique({ where: { email } });
 
@@ -179,10 +198,12 @@ export class AuthService {
         },
       });
       const otp = await this.issueOtp(email, EmailOtpPurpose.SIGNUP);
-      const accessToken = signAccessToken({ id: user.id, email: user.email });
+      const tokens = await this.authTokens(user.id, user.email, req);
       return {
         user: publicUser(user),
-        accessToken,
+        accessToken: tokens.accessToken,
+        sessionId: tokens.sessionId,
+        refreshToken: tokens.refreshToken,
         requiresEmailVerification: true,
         resumed: true,
         otp,
@@ -200,6 +221,7 @@ export class AuthService {
         lastName: input.lastName,
         passwordHash,
         emailVerifiedAt: null,
+        referralCode: generateReferralCode(),
         wallets: {
           create: DEFAULT_WALLETS.map((w) => ({
             currency: w.currency,
@@ -221,17 +243,21 @@ export class AuthService {
       },
     });
 
+    await referralsService.applyReferralAtSignup(user.id, input.referralCode);
+
     const otp = await this.issueOtp(email, EmailOtpPurpose.SIGNUP);
-    const accessToken = signAccessToken({ id: user.id, email: user.email });
+    const tokens = await this.authTokens(user.id, user.email, req);
     return {
       user: publicUser(user),
-      accessToken,
+      accessToken: tokens.accessToken,
+      sessionId: tokens.sessionId,
+      refreshToken: tokens.refreshToken,
       requiresEmailVerification: true,
       otp,
     };
   }
 
-  async login(input: z.infer<typeof loginSchema>) {
+  async login(input: z.infer<typeof loginSchema>, req: Request) {
     const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
     if (!user) {
       throw new AppError("No account found with this email", 401, "EMAIL_NOT_FOUND");
@@ -243,7 +269,7 @@ export class AuthService {
     }
     if (user.status !== "ACTIVE") throw new AppError("Account is not active", 403, "ACCOUNT_INACTIVE");
 
-    const accessToken = signAccessToken({ id: user.id, email: user.email });
+    const tokens = await this.authTokens(user.id, user.email, req);
     const requiresEmailVerification = !user.emailVerifiedAt;
     let otp: Awaited<ReturnType<AuthService["issueOtp"]>> | undefined;
     if (requiresEmailVerification) {
@@ -252,7 +278,9 @@ export class AuthService {
 
     return {
       user: publicUser(user),
-      accessToken,
+      accessToken: tokens.accessToken,
+      sessionId: tokens.sessionId,
+      refreshToken: tokens.refreshToken,
       requiresEmailVerification,
       ...(otp ? { otp } : {}),
     };
@@ -301,7 +329,7 @@ export class AuthService {
     return this.issueOtp(email, purpose);
   }
 
-  async verifyOtp(input: z.infer<typeof verifyOtpSchema>) {
+  async verifyOtp(input: z.infer<typeof verifyOtpSchema>, req: Request) {
     const email = input.email.toLowerCase();
     const purpose = input.purpose as EmailOtpPurpose;
 
@@ -323,12 +351,14 @@ export class AuthService {
           createdAt: true,
         },
       });
-      const accessToken = signAccessToken({ id: user.id, email: user.email });
+      const tokens = await this.authTokens(user.id, user.email, req);
       return {
         ok: true,
         purpose,
         user: publicUser(user),
-        accessToken,
+        accessToken: tokens.accessToken,
+        sessionId: tokens.sessionId,
+        refreshToken: tokens.refreshToken,
       };
     }
 

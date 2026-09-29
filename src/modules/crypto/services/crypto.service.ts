@@ -5,6 +5,8 @@ import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { bushaClient } from "../../../providers/busha/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
+import { securityService } from "../../security/services/security.service.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 import { fxService } from "../../fx/services/fx.service.js";
 import {
   simCryptoAddress,
@@ -1093,7 +1095,9 @@ export class CryptoService {
   }
 
   async send(userId: string, input: z.infer<typeof sendSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.CRYPTO_SEND, "Crypto sends are temporarily disabled");
     await requireNinKyc(userId);
+    await securityService.assertCryptoSendAllowed(userId, input.address);
 
     const currency = input.currency.toUpperCase() as WalletCurrency;
     if (!["USDT", "BTC", "ETH"].includes(currency)) {

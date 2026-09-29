@@ -14,6 +14,10 @@ export const changePasswordSchema = z.object({
   newPassword: z.string().min(8),
 });
 
+export const closureRequestSchema = z.object({
+  reason: z.string().min(3).max(2000),
+});
+
 export class UsersService {
   async getMe(userId: string) {
     const user = await prisma.user.findUnique({
@@ -91,6 +95,30 @@ export class UsersService {
     const row = await prisma.inboxMessage.findFirst({ where: { id, userId } });
     if (!row) throw new NotFoundError("Message not found");
     return prisma.inboxMessage.update({ where: { id }, data: { read: true } });
+  }
+
+  async requestClosure(userId: string, input: z.infer<typeof closureRequestSchema>) {
+    const pending = await prisma.closureRequest.findFirst({
+      where: { userId, status: "PENDING" },
+    });
+    if (pending) {
+      return { ok: true, request: pending, duplicate: true };
+    }
+
+    const request = await prisma.closureRequest.create({
+      data: { userId, reason: input.reason.trim() },
+    });
+
+    await prisma.inboxMessage.create({
+      data: {
+        userId,
+        title: "Wallet closure requested",
+        body: `We received your closure request. Our team will review it within 30 days. Reference: ${request.id.slice(-8).toUpperCase()}`,
+        category: "account",
+      },
+    });
+
+    return { ok: true, request, duplicate: false };
   }
 }
 
