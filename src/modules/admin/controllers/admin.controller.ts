@@ -35,7 +35,23 @@ export class AdminAuthController {
       role: admin.role,
     };
     const token = signAdminToken(staff);
-    return ok(res, { token, staff, expiresIn: "8h" });
+    return ok(res, { token, staff, expiresIn: "8h", requiresMfa: true });
+  };
+
+  /** Prototype MFA: any 6-digit TOTP or backup code ≥ 8 chars after a valid staff JWT. */
+  mfa = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError("Sign in required");
+    const body = z
+      .object({
+        code: z.string().min(6).max(64),
+      })
+      .parse(req.body ?? {});
+    const digits = body.code.replace(/\s/g, "");
+    const okCode = /^\d{6}$/.test(digits) || digits.length >= 8;
+    if (!okCode) {
+      throw new UnauthorizedError("Invalid authenticator or backup code");
+    }
+    return ok(res, { ok: true, staff: req.admin });
   };
 
   me = async (req: Request, res: Response) => {

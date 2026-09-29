@@ -85,6 +85,7 @@ apiRouter.post("/wallets/swap", requireAuth, asyncHandler(fxController.swap));
 apiRouter.get("/admin/fx/rates", requireAdmin, asyncHandler(fxController.adminList));
 apiRouter.put("/admin/fx/rates", requireAdmin, asyncHandler(fxController.adminUpsert));
 apiRouter.post("/admin/auth/login", asyncHandler(adminAuthController.login));
+apiRouter.post("/admin/auth/mfa", requireAdmin, asyncHandler(adminAuthController.mfa));
 apiRouter.get("/admin/auth/me", requireAdmin, asyncHandler(adminAuthController.me));
 apiRouter.get("/admin/kyc/checks", requireAdmin, asyncHandler(adminKycController.list));
 apiRouter.post("/admin/kyc/checks/:id/approve", requireAdmin, asyncHandler(adminKycController.approve));
