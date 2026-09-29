@@ -9,6 +9,7 @@ import { fxService } from "../../fx/services/fx.service.js";
 import {
   simCryptoAddress,
   simRef,
+  simulateProviders,
   useBushaLive,
 } from "../../../lib/simulate.js";
 
@@ -1189,8 +1190,15 @@ export class CryptoService {
     }
   }
 
-  /** Simulate an inbound crypto deposit credit (demo faucet). */
+  /** Simulate an inbound crypto deposit credit (demo faucet). Gated — live credits come from Busha webhooks. */
   async simulateReceive(userId: string, input: z.infer<typeof receiveSchema> & { amount?: number }) {
+    if (!simulateProviders()) {
+      throw new AppError(
+        "Crypto simulate-receive is disabled. Wait for on-chain confirmation.",
+        403,
+        "SIMULATE_DISABLED",
+      );
+    }
     await requireNinKyc(userId);
 
     const currency = input.currency.toUpperCase() as WalletCurrency;

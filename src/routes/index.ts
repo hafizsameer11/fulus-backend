@@ -17,6 +17,7 @@ import { transfersController } from "../modules/transfers/controllers/transfers.
 import { floatJobsService } from "../modules/float/services/float-jobs.service.js";
 import { simulateProviders } from "../lib/simulate.js";
 import { ok } from "../lib/http.js";
+import { adminAuthController, adminKycController } from "../modules/admin/controllers/admin.controller.js";
 
 export const apiRouter = Router();
 
@@ -58,6 +59,11 @@ apiRouter.post("/wallets/swap", requireAuth, asyncHandler(fxController.swap));
 
 apiRouter.get("/admin/fx/rates", requireAdmin, asyncHandler(fxController.adminList));
 apiRouter.put("/admin/fx/rates", requireAdmin, asyncHandler(fxController.adminUpsert));
+apiRouter.post("/admin/auth/login", asyncHandler(adminAuthController.login));
+apiRouter.get("/admin/auth/me", requireAdmin, asyncHandler(adminAuthController.me));
+apiRouter.get("/admin/kyc/checks", requireAdmin, asyncHandler(adminKycController.list));
+apiRouter.post("/admin/kyc/checks/:id/approve", requireAdmin, asyncHandler(adminKycController.approve));
+apiRouter.post("/admin/kyc/checks/:id/reject", requireAdmin, asyncHandler(adminKycController.reject));
 
 apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));

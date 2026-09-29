@@ -9,7 +9,7 @@ import { walletService } from "../../wallet/services/wallet.service.js";
 import { fxService } from "../../fx/services/fx.service.js";
 import { flutterwaveClient, flutterwaveLive } from "../../../providers/flutterwave/client.js";
 import { bushaFloatService } from "../../../providers/busha/float.js";
-import { useBushaLive } from "../../../lib/simulate.js";
+import { simulateProviders, useBushaLive } from "../../../lib/simulate.js";
 
 /** Card processing fee shown in the deposit UI (1.5%). */
 export const CARD_FEE_BPS = 150;
@@ -50,7 +50,18 @@ function feeOn(amount: number) {
 }
 
 export class DepositsService {
+  /**
+   * Fabricated Wema VA — only available in simulate mode for local demos.
+   * Production NGN deposits use Busha temporary accounts (`initiateBushaNgnDeposit`).
+   */
   async ensureVirtualAccount(userId: string) {
+    if (!simulateProviders()) {
+      throw new AppError(
+        "Permanent virtual accounts are not available. Use bank deposit via Busha.",
+        403,
+        "VA_DISABLED",
+      );
+    }
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     const existing = await prisma.virtualAccount.findUnique({
       where: { userId_currency_provider: { userId, currency: "NGN", provider: "fulus" } },
@@ -73,10 +84,16 @@ export class DepositsService {
   }
 
   /**
-   * Mock bank deposit: credits the user's NGN wallet immediately and returns
-   * a real wallet transaction (no external bank / VA webhook yet).
+   * Mock bank deposit (simulate mode only). Live NGN funding uses Busha.
    */
   async createBankDeposit(userId: string, input: z.infer<typeof createDepositSchema>) {
+    if (!simulateProviders()) {
+      throw new AppError(
+        "Mock bank deposit is disabled. Use POST /deposits/busha/ngn.",
+        403,
+        "SIMULATE_DISABLED",
+      );
+    }
     if (input.currency !== "NGN") {
       throw new AppError("USD and SAR are virtual — fund via swap from NGN", 400, "VIRTUAL_CURRENCY");
     }

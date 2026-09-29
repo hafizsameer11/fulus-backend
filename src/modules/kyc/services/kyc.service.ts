@@ -29,16 +29,15 @@ export const addressSchema = z.object({
   postalCode: z.string().optional(),
   documentName: z.string().min(1, "Proof of address is required"),
   documentType: z.string().optional(),
+  /** Base64 or data-URL of the uploaded proof — required for real review. */
+  documentImage: z.string().min(40, "Upload a proof-of-address image"),
 });
 
-export const faceSchema = z
-  .object({
-    image: z.string().min(10).optional(),
-    selfieToken: z.string().min(4).optional(),
-  })
-  .refine((v) => Boolean(v.image || v.selfieToken), {
-    message: "Provide selfieToken or image",
-  });
+export const faceSchema = z.object({
+  /** Base64 or data-URL selfie — required (no token-only pass). */
+  image: z.string().min(40, "Selfie image is required"),
+  selfieToken: z.string().min(4).optional(),
+});
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -121,7 +120,11 @@ export class KycService {
   }
 
   async verifyAddress(userId: string, input: z.infer<typeof addressSchema>) {
-    const check = await this.beginCheck(userId, "ADDRESS", input);
+    const { documentImage, ...meta } = input;
+    const check = await this.beginCheck(userId, "ADDRESS", {
+      ...meta,
+      hasDocumentImage: Boolean(documentImage && documentImage.length > 40),
+    });
     runInBackground(`address:${check.id}`, () => this.processAddress(check.id, userId, input));
     return check;
   }
@@ -303,16 +306,43 @@ export class KycService {
 
   private async processAddress(checkId: string, userId: string, input: z.infer<typeof addressSchema>) {
     try {
+      if (!input.documentImage || input.documentImage.length < 40) {
+        await this.failCheck(checkId, userId, "ADDRESS", null, "Proof of address image is required");
+        return;
+      }
+      // Never auto-pass ADDRESS — stay PENDING for admin review (compliance).
       const result = {
-        provider: usePremblyLive() ? "prembly-deferred" : "simulated",
-        verified: true,
-        status: true,
-        address: input,
-        note: usePremblyLive()
-          ? "Address accepted pending Prembly document product wiring"
-          : "Simulated address pass",
+        provider: usePremblyLive() ? "prembly-deferred" : "manual-review",
+        verified: false,
+        status: false,
+        address: {
+          line1: input.line1,
+          line2: input.line2,
+          city: input.city,
+          state: input.state,
+          country: input.country,
+          postalCode: input.postalCode,
+          documentName: input.documentName,
+          documentType: input.documentType,
+          hasDocumentImage: true,
+        },
+        note: "Awaiting compliance review of proof of address",
       };
-      await this.passCheck(checkId, userId, "ADDRESS", result);
+      await prisma.kycCheck.update({
+        where: { id: checkId },
+        data: {
+          status: "PENDING",
+          result: asJson(result),
+          // Keep image out of huge JSON if needed later — store flag only; full image in input already
+          failureReason: null,
+        },
+      });
+      await createInboxMessage({
+        userId,
+        category: "kyc",
+        title: "Address under review",
+        body: "We received your proof of address. Compliance will review it before Tier upgrades.",
+      });
     } catch (error) {
       await this.failCheck(
         checkId,
@@ -326,7 +356,12 @@ export class KycService {
 
   private async processFace(checkId: string, userId: string, input: z.infer<typeof faceSchema>) {
     try {
-      if (usePremblyLive() && input.image) {
+      if (!input.image || input.image.length < 40) {
+        await this.failCheck(checkId, userId, "FACE", null, "Upload a live selfie image");
+        return;
+      }
+
+      if (usePremblyLive()) {
         const bvnCheck = await prisma.kycCheck.findFirst({
           where: { userId, type: "BVN", status: "PASSED" },
           orderBy: { createdAt: "desc" },
@@ -352,7 +387,6 @@ export class KycService {
           return;
         }
 
-        // Prefer NIN+face if NIN on file
         const user = await prisma.user.findUnique({ where: { id: userId } });
         if (user?.nin && user.nin.length === 11) {
           const result = await premblyClient.verifyNinWithFace(user.nin, input.image, user.dateOfBirth ?? undefined);
@@ -369,31 +403,25 @@ export class KycService {
           await this.passCheck(checkId, userId, "FACE", result);
           return;
         }
-      }
 
-      const result = {
-        simulated: !usePremblyLive(),
-        verified: true,
-        status: true,
-        hasImage: Boolean(input.image),
-        selfieToken: input.selfieToken,
-        note: usePremblyLive()
-          ? "Face submitted — complete NIN with selfie first for Prembly face match"
-          : "Simulated face pass",
-      };
-
-      if (usePremblyLive() && !input.image) {
         await this.failCheck(
           checkId,
           userId,
           "FACE",
-          result,
-          "Upload a live selfie image so Prembly can match your face",
+          { hasImage: true },
+          "Complete BVN or NIN first so Prembly can match your face",
         );
         return;
       }
 
-      await this.passCheck(checkId, userId, "FACE", result);
+      // Simulate mode: pass only when a real image was provided (no token-only shortcut).
+      await this.passCheck(checkId, userId, "FACE", {
+        simulated: true,
+        verified: true,
+        status: true,
+        hasImage: true,
+        note: "Simulated face pass with uploaded selfie",
+      });
     } catch (error) {
       await this.failCheck(
         checkId,
@@ -403,6 +431,32 @@ export class KycService {
         error instanceof Error ? error.message : "Face verification failed",
       );
     }
+  }
+
+  async adminApproveCheck(checkId: string, reviewer: string) {
+    const check = await prisma.kycCheck.findUnique({ where: { id: checkId } });
+    if (!check) throw new AppError("KYC check not found", 404, "NOT_FOUND");
+    if (check.status === "PASSED") return { check };
+    const prev =
+      check.result && typeof check.result === "object" ? (check.result as Record<string, unknown>) : {};
+    await this.passCheck(check.id, check.userId, check.type, {
+      ...prev,
+      adminApprovedBy: reviewer,
+      adminApprovedAt: new Date().toISOString(),
+    });
+    const updated = await prisma.kycCheck.findUniqueOrThrow({ where: { id: checkId } });
+    return { check: updated };
+  }
+
+  async adminRejectCheck(checkId: string, reason: string, reviewer: string) {
+    const check = await prisma.kycCheck.findUnique({ where: { id: checkId } });
+    if (!check) throw new AppError("KYC check not found", 404, "NOT_FOUND");
+    await this.failCheck(check.id, check.userId, check.type, {
+      adminRejectedBy: reviewer,
+      adminRejectedAt: new Date().toISOString(),
+    }, reason);
+    const updated = await prisma.kycCheck.findUniqueOrThrow({ where: { id: checkId } });
+    return { check: updated };
   }
 
   private async passLatestPendingOrCreate(userId: string, type: KycCheckType, result: unknown) {
