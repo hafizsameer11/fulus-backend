@@ -289,9 +289,12 @@ export class AdminListController {
 
   listCards = async (req: Request, res: Response) => {
     const { page, limit, skip } = parsePagination(req);
+    const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
+    const where = userId ? { userId } : {};
     const [total, cards] = await Promise.all([
-      prisma.card.count(),
+      prisma.card.count({ where }),
       prisma.card.findMany({
+        where,
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,

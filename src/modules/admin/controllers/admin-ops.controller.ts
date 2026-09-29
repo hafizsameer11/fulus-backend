@@ -296,9 +296,12 @@ export class AdminOpsController {
 
   listBillPayments = async (req: Request, res: Response) => {
     const { page, limit, skip } = parsePagination(req);
+    const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
+    const where = userId ? { userId } : {};
     const [total, items] = await Promise.all([
-      prisma.billPayment.count(),
+      prisma.billPayment.count({ where }),
       prisma.billPayment.findMany({
+        where,
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
@@ -343,9 +346,12 @@ export class AdminOpsController {
 
   listCryptoOrders = async (req: Request, res: Response) => {
     const { page, limit, skip } = parsePagination(req);
+    const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
+    const where = userId ? { userId } : {};
     const [total, items] = await Promise.all([
-      prisma.cryptoOrder.count(),
+      prisma.cryptoOrder.count({ where }),
       prisma.cryptoOrder.findMany({
+        where,
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
@@ -379,9 +385,12 @@ export class AdminOpsController {
 
   listCryptoAddresses = async (req: Request, res: Response) => {
     const { page, limit, skip } = parsePagination(req);
+    const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
+    const where = userId ? { userId } : {};
     const [total, items] = await Promise.all([
-      prisma.cryptoAddress.count(),
+      prisma.cryptoAddress.count({ where }),
       prisma.cryptoAddress.findMany({
+        where,
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
