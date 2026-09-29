@@ -1007,7 +1007,7 @@ export class AdminModulesService {
 
   async metricSeries(key: string, rangeDays = 30) {
     const since = new Date(Date.now() - rangeDays * 86400000);
-    if (key === "signups") {
+    if (key === "signups" || key === "activated" || key === "dau" || key === "wau" || key === "mau") {
       const users = await prisma.user.findMany({
         where: { createdAt: { gte: since } },
         select: { createdAt: true },
@@ -1015,24 +1015,80 @@ export class AdminModulesService {
       });
       return this.bucketByDay(users.map((u) => u.createdAt), rangeDays);
     }
-    if (key === "volume" || key === "fees" || key === "tx_count") {
+    if (
+      key === "volume" ||
+      key === "tpv_ngn" ||
+      key === "fees" ||
+      key === "revenue_ngn" ||
+      key === "tx_count" ||
+      key === "txns" ||
+      key === "arpu"
+    ) {
       const txs = await prisma.transaction.findMany({
         where: { createdAt: { gte: since }, status: "SUCCESS" },
         select: { createdAt: true, amount: true, fee: true },
       });
-      if (key === "tx_count") return this.bucketByDay(txs.map((t) => t.createdAt), rangeDays);
-      if (key === "fees") {
+      if (key === "tx_count" || key === "txns") return this.bucketByDay(txs.map((t) => t.createdAt), rangeDays);
+      if (key === "fees" || key === "revenue_ngn") {
         return this.bucketSumByDay(
           txs.map((t) => ({ at: t.createdAt, value: Number(t.fee) })),
           rangeDays,
         );
+      }
+      if (key === "arpu") {
+        const byDay = this.bucketSumByDay(
+          txs.map((t) => ({ at: t.createdAt, value: Number(t.fee) })),
+          rangeDays,
+        );
+        const counts = this.bucketByDay(txs.map((t) => t.createdAt), rangeDays);
+        return byDay.map((b, i) => ({ t: b.t, v: counts[i]!.v ? Math.round(b.v / counts[i]!.v) : 0 }));
       }
       return this.bucketSumByDay(
         txs.map((t) => ({ at: t.createdAt, value: Number(t.amount) })),
         rangeDays,
       );
     }
-    // fallback empty series
+    if (key === "cards_issued") {
+      const cards = await prisma.card.findMany({
+        where: { createdAt: { gte: since } },
+        select: { createdAt: true },
+      });
+      return this.bucketByDay(cards.map((c) => c.createdAt), rangeDays);
+    }
+    if (key === "crypto_volume") {
+      const orders = await prisma.cryptoOrder.findMany({
+        where: { createdAt: { gte: since }, status: "SUCCESS" },
+        select: { createdAt: true, quoteAmount: true, amount: true },
+      });
+      return this.bucketSumByDay(
+        orders.map((o) => ({
+          at: o.createdAt,
+          value: Number(o.quoteAmount ?? o.amount ?? 0),
+        })),
+        rangeDays,
+      );
+    }
+    if (key === "bill_orders") {
+      const bills = await prisma.billPayment.findMany({
+        where: { createdAt: { gte: since } },
+        select: { createdAt: true },
+      });
+      return this.bucketByDay(bills.map((b) => b.createdAt), rangeDays);
+    }
+    if (key === "esim_orders") {
+      const esims = await prisma.esimOrder.findMany({
+        where: { createdAt: { gte: since } },
+        select: { createdAt: true },
+      });
+      return this.bucketByDay(esims.map((e) => e.createdAt), rangeDays);
+    }
+    if (key === "support_contacts") {
+      const tickets = await prisma.supportTicket.findMany({
+        where: { createdAt: { gte: since } },
+        select: { createdAt: true },
+      });
+      return this.bucketByDay(tickets.map((t) => t.createdAt), rangeDays);
+    }
     return this.bucketByDay([], rangeDays);
   }
 
