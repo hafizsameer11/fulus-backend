@@ -367,12 +367,23 @@ export class KycService {
         },
         note: "Awaiting compliance review of proof of address",
       };
+      const pendingRow = await prisma.kycCheck.findUnique({ where: { id: checkId } });
+      const pendingPrev =
+        pendingRow?.result && typeof pendingRow.result === "object"
+          ? (pendingRow.result as Record<string, unknown>)
+          : {};
+      const evidencePaths =
+        pendingPrev.evidencePaths && typeof pendingPrev.evidencePaths === "object"
+          ? pendingPrev.evidencePaths
+          : undefined;
       await prisma.kycCheck.update({
         where: { id: checkId },
         data: {
           status: "PENDING",
-          result: asJson(result),
-          // Keep image out of huge JSON if needed later — store flag only; full image in input already
+          result: asJson({
+            ...result,
+            ...(evidencePaths ? { evidencePaths } : {}),
+          }),
           failureReason: null,
         },
       });
@@ -560,12 +571,31 @@ export class KycService {
     await this.failCheck(pending.id, userId, type, result, reason);
   }
 
+  private async mergeResultPreservingEvidence(
+    checkId: string,
+    result: unknown,
+  ): Promise<Prisma.InputJsonValue> {
+    const row = await prisma.kycCheck.findUnique({ where: { id: checkId } });
+    const prev =
+      row?.result && typeof row.result === "object" ? (row.result as Record<string, unknown>) : {};
+    const evidencePaths =
+      prev.evidencePaths && typeof prev.evidencePaths === "object" ? prev.evidencePaths : undefined;
+    const next =
+      result && typeof result === "object" && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : { value: result };
+    return asJson({
+      ...next,
+      ...(evidencePaths ? { evidencePaths } : {}),
+    });
+  }
+
   private async passCheck(checkId: string, userId: string, type: KycCheckType, result: unknown) {
     await prisma.kycCheck.update({
       where: { id: checkId },
       data: {
         status: "PASSED",
-        result: asJson(result),
+        result: await this.mergeResultPreservingEvidence(checkId, result),
         failureReason: null,
       },
     });
@@ -589,7 +619,8 @@ export class KycService {
       where: { id: checkId },
       data: {
         status: "FAILED",
-        result: result == null ? undefined : asJson(result),
+        result:
+          result == null ? await this.mergeResultPreservingEvidence(checkId, {}) : await this.mergeResultPreservingEvidence(checkId, result),
         failureReason: reason,
       },
     });

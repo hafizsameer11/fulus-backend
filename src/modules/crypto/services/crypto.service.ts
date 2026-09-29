@@ -32,6 +32,7 @@ export const sendSchema = z.object({
   amount: z.number().positive(),
   address: z.string().min(8),
   memo: z.string().optional(),
+  transactionPin: z.string().regex(/^\d{4,6}$/).optional(),
 });
 
 export const receiveSchema = z.object({
@@ -1097,6 +1098,7 @@ export class CryptoService {
   async send(userId: string, input: z.infer<typeof sendSchema>) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.CRYPTO_SEND, "Crypto sends are temporarily disabled");
     await requireNinKyc(userId);
+    await securityService.assertTransactionPin(userId, input.transactionPin);
     await securityService.assertCryptoSendAllowed(userId, input.address);
 
     const currency = input.currency.toUpperCase() as WalletCurrency;

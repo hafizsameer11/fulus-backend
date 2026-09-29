@@ -99,6 +99,11 @@ apiRouter.get("/admin/transactions/:id", requireAdmin, asyncHandler(adminListCon
 apiRouter.get("/admin/deposits", requireAdmin, asyncHandler(adminListController.listDeposits));
 apiRouter.get("/admin/payouts", requireAdmin, asyncHandler(adminListController.listPayouts));
 apiRouter.get("/admin/cards", requireAdmin, asyncHandler(adminListController.listCards));
+apiRouter.get(
+  "/admin/float",
+  requireAdmin,
+  asyncHandler(async (_req, res) => ok(res, await floatJobsService.reconcile())),
+);
 
 apiRouter.get("/deposits", requireAuth, asyncHandler(depositsController.list));
 apiRouter.post("/deposits/bank", requireAuth, asyncHandler(depositsController.createBank));

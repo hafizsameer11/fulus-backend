@@ -679,10 +679,15 @@ button:active{opacity:.85}button:disabled{opacity:.5}
         amount: opts.ngnCredit,
         idempotencyKey: `card-fund-swap-${opts.depositId}`,
       });
-      const funded = await cardsService.fund(opts.userId, opts.cardId, {
-        amount: opts.usdAmount,
-        currency: "USD",
-      });
+      const funded = await cardsService.fund(
+        opts.userId,
+        opts.cardId,
+        {
+          amount: opts.usdAmount,
+          currency: "USD",
+        },
+        { skipPinCheck: true },
+      );
       const deposit = await prisma.deposit.findUnique({ where: { id: opts.depositId } });
       const meta = asRecord(deposit?.metadata);
       await prisma.deposit.update({

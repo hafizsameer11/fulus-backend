@@ -17,6 +17,7 @@ import { fxService } from "../../fx/services/fx.service.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
 import { simLast4, simRef, usePagocardsLive } from "../../../lib/simulate.js";
 import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
+import { securityService } from "../../security/services/security.service.js";
 
 export const createCardSchema = z.object({
   label: z.string().min(1).max(40).optional(),
@@ -31,11 +32,13 @@ export const fundCardSchema = z.object({
   /** Amount that lands on the card (Pagocards takes $0.15 + 0.75% on top from merchant wallet). */
   amount: z.number().positive(),
   currency: z.enum(["USD", "NGN", "SAR"]).default("USD"),
+  transactionPin: z.string().regex(/^\d{4,6}$/).optional(),
 });
 
 export const withdrawCardSchema = z.object({
   /** USD to pull off the card (must leave ≥ $5). Settles to NGN after Pagocards webhook. */
   amount: z.number().positive(),
+  transactionPin: z.string().regex(/^\d{4,6}$/).optional(),
 });
 
 export const renameCardSchema = z.object({
@@ -506,8 +509,16 @@ export class CardsService {
     }
   }
 
-  async fund(userId: string, cardId: string, input: z.infer<typeof fundCardSchema>) {
+  async fund(
+    userId: string,
+    cardId: string,
+    input: z.infer<typeof fundCardSchema>,
+    opts?: { skipPinCheck?: boolean },
+  ) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.CARDS_FUND, "Card funding is temporarily disabled");
+    if (!opts?.skipPinCheck) {
+      await securityService.assertTransactionPin(userId, input.transactionPin);
+    }
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready for funding");
 
@@ -599,6 +610,7 @@ export class CardsService {
    * @see https://pagocards.com/documentation — Withdraw 4XX-BIN Card
    */
   async withdraw(userId: string, cardId: string, input: z.infer<typeof withdrawCardSchema>) {
+    await securityService.assertTransactionPin(userId, input.transactionPin);
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready for withdrawal");
     if (String(card.status).toUpperCase() === "FROZEN") {
