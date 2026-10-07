@@ -1029,6 +1029,116 @@ export class CardsService {
       transaction: f.transaction,
     }));
   }
+
+  /**
+   * Persist a merchant authorisation from a card provider webhook (Strowallet / Pagocards).
+   * Idempotent on `reference` / `id` → networkRef. Skips events that cannot be linked to a Card.
+   */
+  async recordAuthorizationFromWebhook(payload: Record<string, unknown>) {
+    const providerCardId =
+      pickStr(payload.cardId) ??
+      pickStr(payload.card_Id) ??
+      pickStr(payload.card_id) ??
+      pickStr(payload.cardid);
+    if (!providerCardId) return null;
+
+    const networkRef =
+      pickStr(payload.reference) ??
+      pickStr(payload.id) ??
+      pickStr(payload["transaction.created"]) ??
+      pickStr(payload["authorization.request"]);
+
+    if (networkRef) {
+      const existing = await prisma.cardAuthorization.findFirst({ where: { networkRef } });
+      if (existing) return existing;
+    }
+
+    const card = await prisma.card.findFirst({
+      where: { OR: [{ providerCardId }, { id: providerCardId }] },
+      include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
+    });
+    if (!card) return null;
+
+    const amount = pickNum(payload.amount) ?? pickNum(payload.merchantAmount) ?? 0;
+    const currency = (pickStr(payload.currency) ?? card.currency ?? "USD").toUpperCase();
+    const status = (pickStr(payload.status) ?? "").toLowerCase();
+    const type = (pickStr(payload.type) ?? "").toLowerCase();
+    const reason = pickStr(payload.reason) ?? pickStr(payload.narrative) ?? "";
+
+    let decision = "approved";
+    if (type.includes("declined") || status === "failed" || status === "declined" || /decline|deny|reject/i.test(reason)) {
+      decision = "declined";
+    } else if (type.includes("refund") || status === "reversed" || status === "refunded") {
+      decision = "reversed";
+    } else if (status === "pending" || status === "processing") {
+      decision = "pending";
+    }
+
+    const merchant =
+      pickStr(payload.merchant) ??
+      (typeof payload.merchant === "object" && payload.merchant
+        ? pickStr((payload.merchant as Record<string, unknown>).name)
+        : undefined) ??
+      pickStr(payload.narrative) ??
+      "Card merchant";
+
+    const mcc =
+      pickStr(payload.mcc) ??
+      (typeof payload.merchant === "object" && payload.merchant
+        ? pickStr((payload.merchant as Record<string, unknown>).category)
+        : undefined) ??
+      "";
+
+    const country =
+      pickStr(payload.country) ??
+      (typeof payload.merchant === "object" && payload.merchant
+        ? pickStr((payload.merchant as Record<string, unknown>).country)
+        : undefined) ??
+      "";
+
+    const declineCode =
+      decision === "declined"
+        ? (reason.match(/\b(51|05|57|61|65|91|1A|62)\b/i)?.[1]?.toUpperCase() ?? "05")
+        : null;
+
+    const atRaw = pickStr(payload.date) ?? pickStr(payload.createdAt);
+    const at = atRaw ? new Date(atRaw) : new Date();
+    const name = [card.user.firstName, card.user.lastName].filter(Boolean).join(" ").trim() || card.user.email;
+
+    return prisma.cardAuthorization.create({
+      data: {
+        cardId: card.id,
+        userId: card.userId,
+        last4: card.last4 ?? "",
+        customerName: name,
+        merchant,
+        mcc,
+        mccLabel: mcc || "—",
+        country,
+        amount,
+        currency,
+        billingAmount: amount,
+        fxRate: 1,
+        decision,
+        declineCode,
+        threeDs: false,
+        networkRef: networkRef ?? undefined,
+        latencyMs: 0,
+        riskScore: decision === "declined" ? 55 : 15,
+        at: Number.isNaN(at.getTime()) ? new Date() : at,
+      },
+    });
+  }
+}
+
+function pickStr(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+function pickNum(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() && !Number.isNaN(Number(v))) return Number(v);
+  return undefined;
 }
 
 export const cardsService = new CardsService();

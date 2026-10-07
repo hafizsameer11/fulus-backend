@@ -598,51 +598,37 @@ export class AdminModulesService {
     return row;
   }
 
-  async ensureAuthSeed() {
-    const count = await prisma.cardAuthorization.count();
-    if (count > 0) return;
-    const now = Date.now();
-    await prisma.cardAuthorization.createMany({
-      data: [
-        {
-          last4: "4242",
-          customerName: "Demo User",
-          merchant: "Netflix",
-          mcc: "4899",
-          mccLabel: "Cable/Streaming",
-          country: "US",
-          amount: 15.99,
-          billingAmount: 15.99,
-          decision: "approved",
-          threeDs: false,
-          riskScore: 12,
-          latencyMs: 180,
-          at: new Date(now - 120000),
-        },
-        {
-          last4: "1881",
-          customerName: "Ada Okeke",
-          merchant: "Steam",
-          mcc: "5816",
-          mccLabel: "Digital goods",
-          country: "NL",
-          amount: 49.99,
-          billingAmount: 49.99,
-          decision: "declined",
-          declineCode: "do_not_honor",
-          threeDs: true,
-          riskScore: 71,
-          latencyMs: 240,
-          at: new Date(now - 3600000),
-        },
-      ],
-    });
+  /** Drop prototype seed rows (no linked user) so the admin stream is never fake. */
+  private async purgeUnlinkedAuthSeed() {
+    await prisma.cardAuthorization.deleteMany({ where: { userId: null } });
   }
 
-  async listCardAuthorisations(filters: { decision?: string; q?: string } = {}) {
-    await this.ensureAuthSeed();
-    const where: Prisma.CardAuthorizationWhereInput = {};
+  /** One-shot backfill from stored card-auth webhooks when the table has no live rows yet. */
+  private async backfillAuthsFromWebhooks() {
+    const linked = await prisma.cardAuthorization.count({ where: { userId: { not: null } } });
+    if (linked > 0) return;
+    const { cardsService } = await import("../../cards/services/cards.service.js");
+    const events = await prisma.webhookEvent.findMany({
+      where: { provider: { in: ["strowallet", "pagocards"] } },
+      orderBy: { createdAt: "desc" },
+      take: 300,
+    });
+    for (const e of events) {
+      const p =
+        e.payload && typeof e.payload === "object" ? (e.payload as Record<string, unknown>) : {};
+      const evt = String(e.eventType ?? p.event ?? "").toLowerCase();
+      if (!evt.includes("authorization") && !evt.includes("authorisation")) continue;
+      await cardsService.recordAuthorizationFromWebhook(p);
+    }
+  }
+
+  async listCardAuthorisations(filters: { decision?: string; q?: string; cardId?: string } = {}) {
+    await this.purgeUnlinkedAuthSeed();
+    await this.backfillAuthsFromWebhooks();
+
+    const where: Prisma.CardAuthorizationWhereInput = { userId: { not: null } };
     if (filters.decision && filters.decision !== "all") where.decision = filters.decision;
+    if (filters.cardId) where.cardId = filters.cardId;
     if (filters.q?.trim()) {
       const q = filters.q.trim();
       where.OR = [
@@ -650,31 +636,52 @@ export class AdminModulesService {
         { customerName: { contains: q } },
         { last4: { contains: q } },
         { mcc: { contains: q } },
+        { networkRef: { contains: q } },
       ];
     }
-    const rows = await prisma.cardAuthorization.findMany({ where, orderBy: { at: "desc" }, take: 200 });
-    return rows.map((a) => ({
-      id: a.id,
-      at: a.at.toISOString(),
-      cardId: a.cardId ?? "",
-      last4: a.last4,
-      customerId: a.userId ?? "",
-      customerName: a.customerName,
-      merchant: a.merchant,
-      mcc: a.mcc,
-      mccLabel: a.mccLabel,
-      country: a.country,
-      amount: Number(a.amount),
-      currency: a.currency,
-      billingAmount: Number(a.billingAmount),
-      fxRate: Number(a.fxRate),
-      decision: a.decision,
-      declineCode: a.declineCode,
-      threeDs: a.threeDs,
-      networkRef: a.networkRef,
-      latencyMs: a.latencyMs,
-      riskScore: a.riskScore,
-    }));
+    const rows = await prisma.cardAuthorization.findMany({
+      where,
+      orderBy: { at: "desc" },
+      take: 200,
+    });
+    const userIds = [...new Set(rows.map((a) => a.userId).filter(Boolean))] as string[];
+    const users = userIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, email: true, firstName: true, lastName: true },
+        })
+      : [];
+    const byId = new Map(users.map((u) => [u.id, u]));
+
+    return rows.map((a) => {
+      const u = a.userId ? byId.get(a.userId) : undefined;
+      const name = u
+        ? [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || u.email
+        : a.customerName;
+      return {
+        id: a.id,
+        at: a.at.toISOString(),
+        cardId: a.cardId ?? "",
+        last4: a.last4,
+        customerId: a.userId ?? "",
+        customerName: name,
+        customerEmail: u?.email ?? "",
+        merchant: a.merchant,
+        mcc: a.mcc,
+        mccLabel: a.mccLabel,
+        country: a.country,
+        amount: Number(a.amount),
+        currency: a.currency,
+        billingAmount: Number(a.billingAmount),
+        fxRate: Number(a.fxRate),
+        decision: a.decision,
+        declineCode: a.declineCode,
+        threeDs: a.threeDs,
+        networkRef: a.networkRef,
+        latencyMs: a.latencyMs,
+        riskScore: a.riskScore,
+      };
+    });
   }
 
   async reverseAuth(id: string, actor = "admin", reason = "") {

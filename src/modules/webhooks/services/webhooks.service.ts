@@ -623,6 +623,17 @@ export class WebhooksService {
         await this.handleCardLifecycleWebhook(p);
       }
 
+      // 4) Legacy auth payloads keyed as authorization.request (no virtualcard.* event)
+      if (p["authorization.request"]) {
+        await cardsService.recordAuthorizationFromWebhook({
+          ...p,
+          event: "virtualcard.transaction.authorization",
+          reference: str(p["authorization.request"]) ?? str(p.reference),
+          cardId: str(p.cardId) ?? str(p.card_Id) ?? str(p.card_id),
+          status: str(p.status) ?? "approved",
+        });
+      }
+
       return prisma.webhookEvent.update({
         where: { id: event.id },
         data: { processed: true, error: null },
@@ -761,8 +772,21 @@ export class WebhooksService {
   }
 
   private async handleCardLifecycleWebhook(p: Record<string, unknown>) {
-    const cardId = str(p.cardId);
+    const cardId = str(p.cardId) ?? str(p.card_Id) ?? str(p.card_id);
     const evt = str(p.event) ?? "";
+
+    // Merchant authorisations — persist for admin Cards → Authorisations
+    if (
+      evt.includes("authorization") ||
+      evt.includes("authorisation") ||
+      (evt.includes("transaction") && (str(p.type) ?? "").toLowerCase().includes("authorization"))
+    ) {
+      await cardsService.recordAuthorizationFromWebhook(p);
+      if (!evt.includes("created") && !evt.includes("topup") && !evt.includes("withdraw") && !evt.includes("terminated")) {
+        return;
+      }
+    }
+
     if (!cardId) return;
 
     const card = await prisma.card.findFirst({

@@ -369,46 +369,6 @@ export async function ensureAdminModulesSeed() {
         },
       ],
     });
-
-    await prisma.cardAuthorization.createMany({
-      data: [
-        {
-          merchant: "Netflix.com",
-          mcc: "5815",
-          mccLabel: "Digital goods — media",
-          country: "US",
-          amount: 15.99,
-          currency: "USD",
-          billingAmount: 25264,
-          fxRate: 1580,
-          decision: "approved",
-          last4: "4821",
-          customerName: "Amaka Obi",
-          threeDs: true,
-          networkRef: "NET-8821",
-          latencyMs: 420,
-          riskScore: 12,
-        },
-        {
-          merchant: "Meta Ads",
-          mcc: "5734",
-          mccLabel: "Software & SaaS",
-          country: "IE",
-          amount: 250,
-          currency: "USD",
-          billingAmount: 395000,
-          fxRate: 1580,
-          decision: "declined",
-          declineCode: "51",
-          last4: "9012",
-          customerName: "Tunde Bello",
-          threeDs: false,
-          networkRef: "META-4412",
-          latencyMs: 890,
-          riskScore: 44,
-        },
-      ],
-    });
   }
 
   if (netCount === 0) {
