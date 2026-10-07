@@ -749,25 +749,48 @@ export class AdminModulesService {
 
   async listNetworks() {
     await this.ensureNetworkSeed();
-    const rows = await prisma.cryptoNetworkPolicy.findMany({ orderBy: { name: "asc" } });
-    return rows.map((n) => ({
-      id: n.id,
-      name: n.name,
-      short: n.short,
-      assets: Array.isArray(n.assets) ? n.assets : [],
-      status: n.status,
-      depositsEnabled: n.depositsEnabled,
-      withdrawalsEnabled: n.withdrawalsEnabled,
-      confirmations: n.confirmations,
-      avgBlockSec: n.avgBlockSec,
-      medianConfirmMin: Number(n.medianConfirmMin),
-      networkFeeUsd: Number(n.networkFeeUsd),
-      feePolicy: n.feePolicy,
-      pendingDeposits: n.pendingDeposits,
-      pendingWithdrawals: n.pendingWithdrawals,
-      notice: n.notice ?? undefined,
-      explorer: n.explorer,
-    }));
+    const [rows, pendingOrders] = await Promise.all([
+      prisma.cryptoNetworkPolicy.findMany({ orderBy: { name: "asc" } }),
+      prisma.cryptoOrder.findMany({
+        where: { status: { in: ["PENDING", "PROCESSING"] } },
+        select: { side: true, network: true },
+        take: 2000,
+      }),
+    ]);
+
+    const pendingIn = new Map<string, number>();
+    const pendingOut = new Map<string, number>();
+    for (const o of pendingOrders) {
+      const net = (o.network ?? "").toLowerCase();
+      if (!net) continue;
+      if (o.side === "RECEIVE" || o.side === "BUY") {
+        pendingIn.set(net, (pendingIn.get(net) ?? 0) + 1);
+      } else if (o.side === "SEND" || o.side === "SELL") {
+        pendingOut.set(net, (pendingOut.get(net) ?? 0) + 1);
+      }
+    }
+
+    return rows.map((n) => {
+      const id = n.id.toLowerCase();
+      return {
+        id: n.id,
+        name: n.name,
+        short: n.short,
+        assets: Array.isArray(n.assets) ? n.assets : [],
+        status: n.status,
+        depositsEnabled: n.depositsEnabled,
+        withdrawalsEnabled: n.withdrawalsEnabled,
+        confirmations: n.confirmations,
+        avgBlockSec: n.avgBlockSec,
+        medianConfirmMin: Number(n.medianConfirmMin),
+        networkFeeUsd: Number(n.networkFeeUsd),
+        feePolicy: n.feePolicy,
+        pendingDeposits: pendingIn.get(id) ?? 0,
+        pendingWithdrawals: pendingOut.get(id) ?? 0,
+        notice: n.notice ?? undefined,
+        explorer: n.explorer,
+      };
+    });
   }
 
   async upsertNetwork(id: string, body: Record<string, unknown>, actor = "admin") {
@@ -797,30 +820,52 @@ export class AdminModulesService {
     return row;
   }
 
-  async ensureExposureSeed() {
-    const count = await prisma.cryptoExposure.count();
-    if (count > 0) return;
-    await prisma.cryptoExposure.createMany({
-      data: [
-        { asset: "BTC", netPositionCoin: 12.4, netPositionUsd: 848000, limitUsd: 1000000, hedgeRatio: 0.72, pnl24hUsd: 18400, autoHalt: false },
-        { asset: "ETH", netPositionCoin: 210, netPositionUsd: 740000, limitUsd: 900000, hedgeRatio: 0.65, pnl24hUsd: -4200, autoHalt: false },
-        { asset: "USDT", netPositionCoin: 2400000, netPositionUsd: 2400000, limitUsd: 5000000, hedgeRatio: 0.98, pnl24hUsd: 1200, autoHalt: false },
-      ],
-    });
-  }
-
   async listExposures() {
-    await this.ensureExposureSeed();
-    const rows = await prisma.cryptoExposure.findMany({ orderBy: { asset: "asc" } });
-    return rows.map((e) => ({
-      asset: e.asset,
-      netPositionCoin: Number(e.netPositionCoin),
-      netPositionUsd: Number(e.netPositionUsd),
-      limitUsd: Number(e.limitUsd),
-      hedgeRatio: Number(e.hedgeRatio),
-      pnl24hUsd: Number(e.pnl24hUsd),
-      autoHalt: e.autoHalt,
-    }));
+    const DEFAULT_LIMITS: Record<string, number> = {
+      BTC: 1_000_000,
+      ETH: 900_000,
+      USDT: 5_000_000,
+    };
+    const [holdings, configs, rates] = await Promise.all([
+      prisma.wallet.groupBy({
+        by: ["currency"],
+        where: { currency: { in: ["BTC", "ETH", "USDT"] } },
+        _sum: { available: true, pending: true },
+      }),
+      prisma.cryptoExposure.findMany(),
+      import("../../crypto/services/crypto.service.js").then((m) => m.cryptoService.rates()).catch(() => []),
+    ]);
+    const configBy = new Map(configs.map((c) => [c.asset.toUpperCase(), c]));
+    const rateBy = new Map(
+      (Array.isArray(rates) ? rates : []).map((r) => {
+        const row = r as Record<string, unknown>;
+        return [String(row.currency ?? "").toUpperCase(), Number(row.usd ?? 0)];
+      }),
+    );
+
+    const codes = new Set<string>([
+      ...holdings.map((h) => String(h.currency).toUpperCase()),
+      ...configs.map((c) => c.asset.toUpperCase()),
+    ]);
+    if (!codes.size) {
+      for (const c of Object.keys(DEFAULT_LIMITS)) codes.add(c);
+    }
+
+    return [...codes].sort().map((asset) => {
+      const hold = holdings.find((h) => String(h.currency).toUpperCase() === asset);
+      const coin = Number(hold?._sum.available ?? 0) + Number(hold?._sum.pending ?? 0);
+      const px = rateBy.get(asset) ?? (asset === "USDT" || asset === "USDC" ? 1 : 0);
+      const cfg = configBy.get(asset);
+      return {
+        asset,
+        netPositionCoin: coin,
+        netPositionUsd: coin * px,
+        limitUsd: cfg ? Number(cfg.limitUsd) : DEFAULT_LIMITS[asset] ?? 1_000_000,
+        hedgeRatio: cfg ? Number(cfg.hedgeRatio) : 0,
+        pnl24hUsd: 0,
+        autoHalt: cfg?.autoHalt ?? false,
+      };
+    });
   }
 
   async upsertExposure(asset: string, body: Record<string, unknown>, actor = "admin") {
@@ -843,8 +888,22 @@ export class AdminModulesService {
   }
 
   async haltAllQuoting(actor = "admin", reason = "") {
-    await this.ensureExposureSeed();
-    await prisma.cryptoExposure.updateMany({ data: { autoHalt: true } });
+    const assets = ["BTC", "ETH", "USDT"];
+    for (const asset of assets) {
+      await prisma.cryptoExposure.upsert({
+        where: { asset },
+        create: {
+          asset,
+          netPositionCoin: 0,
+          netPositionUsd: 0,
+          limitUsd: asset === "USDT" ? 5_000_000 : asset === "ETH" ? 900_000 : 1_000_000,
+          hedgeRatio: 0,
+          pnl24hUsd: 0,
+          autoHalt: true,
+        },
+        update: { autoHalt: true },
+      });
+    }
     await audit(actor, "crypto.liquidity.halt", null, reason || "Halt all quoting");
     return this.listExposures();
   }
