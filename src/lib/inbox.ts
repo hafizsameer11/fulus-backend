@@ -1,4 +1,5 @@
 import { prisma } from "./prisma.js";
+import { sanitizePublicCopy } from "./errors.js";
 
 export async function createInboxMessage(params: {
   userId: string;
@@ -9,8 +10,8 @@ export async function createInboxMessage(params: {
   return prisma.inboxMessage.create({
     data: {
       userId: params.userId,
-      title: params.title,
-      body: params.body,
+      title: sanitizePublicCopy(params.title, "Notification"),
+      body: sanitizePublicCopy(params.body, "Open the app for details."),
       category: params.category ?? "general",
       read: false,
     },

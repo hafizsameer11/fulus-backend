@@ -32,6 +32,22 @@ type CatalogVariation = {
   isActive: boolean;
 };
 
+/** Provider floors — keep UI confirm + API in sync. */
+export const BILL_MIN_AMOUNT_NGN: Record<string, number> = {
+  AIRTIME: 50,
+  ELECTRICITY: 1000,
+  DATA: 50,
+  CABLE: 100,
+  EDUCATION: 500,
+  BETTING: 100,
+  OTHER: 50,
+};
+
+/** Strowallet educational has no plans endpoint — expose the live product(s). */
+const EDUCATION_PRODUCTS: CatalogVariation[] = [
+  { code: "waecdirect", name: "WAEC Result Checker PIN", amount: 3400, isActive: true },
+];
+
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
@@ -224,13 +240,23 @@ export class BillsService {
 
     return Promise.all(
       rows.map(async (svc) => {
+        const minAmount = BILL_MIN_AMOUNT_NGN[svc.category] ?? 50;
+
+        if (svc.category === "EDUCATION") {
+          return {
+            ...svc,
+            minAmount,
+            variations: live ? EDUCATION_PRODUCTS : ([] as CatalogVariation[]),
+          };
+        }
+
         if (svc.category === "AIRTIME" || svc.category === "ELECTRICITY" || svc.category === "BETTING") {
-          return { ...svc, variations: [] as CatalogVariation[] };
+          return { ...svc, minAmount, variations: [] as CatalogVariation[] };
         }
 
         if (!live) {
           // Do not surface seeded 1GB/Compact/etc. demo rows.
-          return { ...svc, variations: [] as CatalogVariation[] };
+          return { ...svc, minAmount, variations: [] as CatalogVariation[] };
         }
 
         try {
@@ -238,19 +264,18 @@ export class BillsService {
             const plans = normalizeProviderPlans(
               await strowalletClient.getDataPlans(dataServiceId(svc.providerCode ?? svc.id)),
             );
-            return { ...svc, variations: plans };
+            return { ...svc, minAmount, variations: plans };
           }
           if (svc.category === "CABLE") {
             const plans = normalizeProviderPlans(await strowalletClient.getCablePlans(svc.providerCode ?? svc.id));
-            return { ...svc, variations: plans };
+            return { ...svc, minAmount, variations: plans };
           }
         } catch (err) {
           console.error(`[bills:catalog] ${svc.category} ${svc.id}`, err);
-          return { ...svc, variations: [] as CatalogVariation[] };
+          return { ...svc, minAmount, variations: [] as CatalogVariation[] };
         }
 
-        // EDUCATION / OTHER — no seeded amounts
-        return { ...svc, variations: [] as CatalogVariation[] };
+        return { ...svc, minAmount, variations: [] as CatalogVariation[] };
       }),
     );
   }
@@ -478,6 +503,25 @@ export class BillsService {
 
     if (input.category === "BETTING") {
       throw new AppError("Betting top-up is not available yet", 400, "UNSUPPORTED_BILL");
+    }
+
+    const minAmount = BILL_MIN_AMOUNT_NGN[input.category] ?? 50;
+    if (input.amount < minAmount) {
+      throw new AppError(
+        `Minimum amount is ₦${minAmount.toLocaleString()}`,
+        400,
+        "MIN_BILL",
+      );
+    }
+
+    if (input.category === "EDUCATION") {
+      const name = input.customerRef.trim();
+      if (name.length < 3 || !/[a-zA-Z]/.test(name)) {
+        throw new AppError("Enter a valid candidate name", 400, "VALIDATION_ERROR");
+      }
+      if (!input.variationCode) {
+        throw new AppError("Select an education product", 400, "VALIDATION_ERROR");
+      }
     }
 
     if (!useStrowalletLive()) {

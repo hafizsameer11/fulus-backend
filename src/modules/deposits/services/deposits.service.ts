@@ -77,7 +77,7 @@ export class DepositsService {
   async ensureVirtualAccount(userId: string) {
     if (!simulateProviders()) {
       throw new AppError(
-        "Permanent virtual accounts are not available. Use bank deposit via Busha.",
+        "Permanent virtual accounts are not available. Use bank deposit instead.",
         403,
         "VA_DISABLED",
       );
