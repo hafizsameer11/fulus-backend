@@ -394,6 +394,80 @@ export class CryptoService {
   }
 
   /**
+   * Admin custody rollup: Busha customer crypto balances (AAVE/SOL/…) plus
+   * local Wallet rows for USDT/BTC/ETH (ledger assets that may not sit on Busha).
+   */
+  async aggregateCustomerHoldings(): Promise<
+    Map<string, { customerHoldings: number; holders: number; pending: number }>
+  > {
+    const holdBy = new Map<string, { customerHoldings: number; holders: number; pending: number }>();
+    const bump = (code: string, available: number, pending: number) => {
+      const key = code.toUpperCase();
+      if (!key || available + pending <= 0) return;
+      const cur = holdBy.get(key) ?? { customerHoldings: 0, holders: 0, pending: 0 };
+      cur.customerHoldings += available + pending;
+      cur.pending += pending;
+      cur.holders += 1;
+      holdBy.set(key, cur);
+    };
+
+    if (useBushaLive()) {
+      const users = await prisma.user.findMany({
+        where: { bushaCustomerId: { not: null } },
+        select: { id: true, bushaCustomerId: true },
+      });
+      const chunk = 5;
+      for (let i = 0; i < users.length; i += chunk) {
+        const slice = users.slice(i, i + chunk);
+        await Promise.all(
+          slice.map(async (u) => {
+            try {
+              const raw = await bushaClient.listBalances(u.bushaCustomerId);
+              for (const b of unwrapList(raw)) {
+                if (String(b.type ?? "").toLowerCase() === "fiat") continue;
+                const code = String(b.currency ?? "").toUpperCase();
+                bump(code, amountOf(b, "available"), amountOf(b, "pending"));
+              }
+            } catch {
+              /* skip customer — don't fail the whole admin rollup */
+            }
+          }),
+        );
+      }
+    }
+
+    const local = await prisma.wallet.groupBy({
+      by: ["currency"],
+      where: { currency: { in: ["BTC", "ETH", "USDT"] } },
+      _sum: { available: true, pending: true },
+      _count: true,
+    });
+    for (const row of local) {
+      const code = String(row.currency);
+      const available = Number(row._sum.available ?? 0);
+      const pending = Number(row._sum.pending ?? 0);
+      const existing = holdBy.get(code);
+      // Prefer Busha when it already reported this asset; otherwise use local ledger.
+      if (!existing) {
+        if (available + pending <= 0 && row._count <= 0) continue;
+        holdBy.set(code, {
+          customerHoldings: available + pending,
+          holders: available + pending > 0 ? row._count : 0,
+          pending,
+        });
+      } else if (existing.customerHoldings <= 0 && available + pending > 0) {
+        holdBy.set(code, {
+          customerHoldings: available + pending,
+          holders: row._count,
+          pending,
+        });
+      }
+    }
+
+    return holdBy;
+  }
+
+  /**
    * Display rates for the app hero ("1 BTC = ₦…").
    * Prefer Busha /v1/pairs with NGN counter (buy_price / sell_price).
    */

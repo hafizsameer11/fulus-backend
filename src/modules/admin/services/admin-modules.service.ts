@@ -1,6 +1,12 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
+import { invalidateCardFeesCache, PAGO_VISA } from "../../../providers/pagocards/fees.js";
+
+/** Live Pagocards USD programme — replaces prototype Marqeta seed rows. */
+const PAGO_PROGRAM_ID = "PRG-PAGO-404";
+const FAKE_PROGRAM_BINS = ["486236", "486241", "539983", "486230"];
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -501,52 +507,118 @@ export class AdminModulesService {
 
   /* --------------------------------- Cards ---------------------------------- */
 
+  /** Drop prototype Marqeta/Stripe programmes; keep one live Pagocards 404 BIN. */
   async ensureCardProgramSeed() {
-    const count = await prisma.cardProgram.count();
-    if (count > 0) return;
-    await prisma.cardProgram.createMany({
-      data: [
-        {
-          id: "PRG-001",
-          name: "Fulus Virtual USD",
-          network: "Visa",
-          processor: "Marqeta",
-          bin: "486236",
-          currency: "USD",
-          issuanceFeeUsd: 6,
-          fxMarkupPct: 1.5,
-          status: "live",
-          cardsIssued: 41820,
-          activeCards: 28407,
-          spend30dUsd: 3940500,
-          approvalRate: 93.4,
-          bufferUsd: 640000,
-          countries: ["NG", "SA", "US", "GB", "EU"],
-        },
-        {
-          id: "PRG-002",
-          name: "Fulus Merchant Locked",
-          network: "Visa",
-          processor: "Marqeta",
-          bin: "486241",
-          currency: "USD",
-          issuanceFeeUsd: 6,
-          monthlyFeeUsd: 1,
-          fxMarkupPct: 1.5,
-          status: "live",
-          cardsIssued: 9140,
-          activeCards: 6902,
-          spend30dUsd: 812400,
-          approvalRate: 95.1,
-          bufferUsd: 120000,
-          countries: ["NG", "SA"],
-        },
-      ],
+    await prisma.cardProgram.deleteMany({
+      where: {
+        OR: [
+          { processor: { in: ["Marqeta", "Stripe Issuing"] } },
+          { bin: { in: FAKE_PROGRAM_BINS } },
+          { id: { in: ["PRG-001", "PRG-002", "PRG-003", "PRG-004"] } },
+        ],
+      },
+    });
+
+    const binPrefix = await this.resolveLiveBinPrefix();
+    await prisma.cardProgram.upsert({
+      where: { id: PAGO_PROGRAM_ID },
+      create: {
+        id: PAGO_PROGRAM_ID,
+        name: "Fulus Virtual USD",
+        network: "Visa",
+        processor: "Pagocards",
+        bin: binPrefix,
+        currency: "USD",
+        formFactor: "virtual",
+        issuanceFeeUsd: PAGO_VISA.issuanceFeeUsd,
+        monthlyFeeUsd: 0,
+        fxMarkupPct: 0,
+        fundFeeFlatUsd: PAGO_VISA.fundFeeFlatUsd,
+        fundFeeRate: PAGO_VISA.fundFeeRate,
+        minFundUsd: PAGO_VISA.minFundUsd,
+        defaultInitialLoadUsd: PAGO_VISA.defaultInitialLoadUsd,
+        minRetainBalanceUsd: PAGO_VISA.minRetainBalanceUsd,
+        status: "live",
+        cardsIssued: 0,
+        activeCards: 0,
+        spend30dUsd: 0,
+        approvalRate: 0,
+        bufferUsd: 0,
+        countries: ["NG", "SA", "US"],
+      },
+      update: {
+        name: "Fulus Virtual USD",
+        network: "Visa",
+        processor: "Pagocards",
+        bin: binPrefix,
+        currency: "USD",
+        formFactor: "virtual",
+        status: "live",
+      },
+    });
+  }
+
+  /** Prefer real PAN prefix from issued cards; fall back to Pagocards 404-BIN. */
+  private async resolveLiveBinPrefix(): Promise<string> {
+    const sample = await prisma.card.findFirst({
+      where: { provider: "pagocards" },
+      orderBy: { createdAt: "asc" },
+      select: { providerPayload: true },
+    });
+    const payload = sample?.providerPayload;
+    if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+      const pan = String((payload as Record<string, unknown>).pan ?? "").replace(/\D/g, "");
+      if (pan.length >= 6) return pan.slice(0, 6);
+    }
+    // Live product `us_404_visa_bin` — six-digit BIN for admin display
+    return PAGO_VISA_BIN_HINT.length >= 6 ? PAGO_VISA_BIN_HINT.slice(0, 6) : "404337";
+  }
+
+  private async refreshCardProgramStats() {
+    const issued = await prisma.card.count({ where: { provider: "pagocards" } });
+    const active = await prisma.card.count({
+      where: { provider: "pagocards", status: { in: ["ACTIVE", "FROZEN"] } },
+    });
+    const bal = await prisma.card.aggregate({
+      where: { provider: "pagocards", status: { in: ["ACTIVE", "FROZEN"] } },
+      _sum: { balance: true },
+    });
+    const since = new Date(Date.now() - 30 * 86400000);
+    const spend = await prisma.cardAuthorization.aggregate({
+      where: {
+        at: { gte: since },
+        decision: { in: ["approved", "settled"] },
+      },
+      _sum: { billingAmount: true },
+    });
+    const decided = await prisma.cardAuthorization.groupBy({
+      by: ["decision"],
+      where: { at: { gte: since } },
+      _count: { _all: true },
+    });
+    let approved = 0;
+    let total = 0;
+    for (const row of decided) {
+      total += row._count._all;
+      if (row.decision === "approved" || row.decision === "settled") approved += row._count._all;
+    }
+    const approvalRate = total > 0 ? Math.round((approved / total) * 1000) / 10 : 0;
+
+    await prisma.cardProgram.update({
+      where: { id: PAGO_PROGRAM_ID },
+      data: {
+        cardsIssued: issued,
+        activeCards: active,
+        spend30dUsd: Number(spend._sum.billingAmount ?? 0),
+        bufferUsd: Number(bal._sum.balance ?? 0),
+        approvalRate,
+      },
     });
   }
 
   async listCardPrograms() {
     await this.ensureCardProgramSeed();
+    await this.refreshCardProgramStats();
     const rows = await prisma.cardProgram.findMany({ orderBy: { name: "asc" } });
     return rows.map((p) => ({
       id: p.id,
@@ -559,6 +631,11 @@ export class AdminModulesService {
       issuanceFeeUsd: Number(p.issuanceFeeUsd),
       monthlyFeeUsd: Number(p.monthlyFeeUsd),
       fxMarkupPct: Number(p.fxMarkupPct),
+      fundFeeFlatUsd: Number(p.fundFeeFlatUsd),
+      fundFeeRate: Number(p.fundFeeRate),
+      minFundUsd: Number(p.minFundUsd),
+      defaultInitialLoadUsd: Number(p.defaultInitialLoadUsd),
+      minRetainBalanceUsd: Number(p.minRetainBalanceUsd),
       status: p.status,
       cardsIssued: p.cardsIssued,
       activeCards: p.activeCards,
@@ -571,31 +648,71 @@ export class AdminModulesService {
 
   async upsertCardProgram(body: Record<string, unknown>, actor = "admin") {
     const id = String(body.id ?? `PRG-${Date.now().toString().slice(-6)}`);
+    const existing = await prisma.cardProgram.findUnique({ where: { id } });
     const data = {
-      name: String(body.name ?? "Program"),
-      network: String(body.network ?? "Visa"),
-      processor: String(body.processor ?? ""),
-      bin: String(body.bin ?? ""),
-      currency: String(body.currency ?? "USD"),
-      formFactor: String(body.formFactor ?? "virtual"),
-      issuanceFeeUsd: Number(body.issuanceFeeUsd ?? 0),
-      monthlyFeeUsd: Number(body.monthlyFeeUsd ?? 0),
-      fxMarkupPct: Number(body.fxMarkupPct ?? 0),
-      status: String(body.status ?? "live"),
-      cardsIssued: Number(body.cardsIssued ?? 0),
-      activeCards: Number(body.activeCards ?? 0),
-      spend30dUsd: Number(body.spend30dUsd ?? 0),
-      approvalRate: Number(body.approvalRate ?? 0),
-      bufferUsd: Number(body.bufferUsd ?? 0),
-      countries: asJson(body.countries ?? []),
+      name: String(body.name ?? existing?.name ?? "Program"),
+      network: String(body.network ?? existing?.network ?? "Visa"),
+      processor: String(body.processor ?? existing?.processor ?? ""),
+      bin: String(body.bin ?? existing?.bin ?? ""),
+      currency: String(body.currency ?? existing?.currency ?? "USD"),
+      formFactor: String(body.formFactor ?? existing?.formFactor ?? "virtual"),
+      issuanceFeeUsd: Number(body.issuanceFeeUsd ?? existing?.issuanceFeeUsd ?? PAGO_VISA.issuanceFeeUsd),
+      monthlyFeeUsd: Number(body.monthlyFeeUsd ?? existing?.monthlyFeeUsd ?? 0),
+      fxMarkupPct: Number(body.fxMarkupPct ?? existing?.fxMarkupPct ?? 0),
+      fundFeeFlatUsd: Number(body.fundFeeFlatUsd ?? existing?.fundFeeFlatUsd ?? PAGO_VISA.fundFeeFlatUsd),
+      fundFeeRate: Number(body.fundFeeRate ?? existing?.fundFeeRate ?? PAGO_VISA.fundFeeRate),
+      minFundUsd: Number(body.minFundUsd ?? existing?.minFundUsd ?? PAGO_VISA.minFundUsd),
+      defaultInitialLoadUsd: Number(
+        body.defaultInitialLoadUsd ?? existing?.defaultInitialLoadUsd ?? PAGO_VISA.defaultInitialLoadUsd,
+      ),
+      minRetainBalanceUsd: Number(
+        body.minRetainBalanceUsd ?? existing?.minRetainBalanceUsd ?? PAGO_VISA.minRetainBalanceUsd,
+      ),
+      status: String(body.status ?? existing?.status ?? "live"),
+      cardsIssued: Number(body.cardsIssued ?? existing?.cardsIssued ?? 0),
+      activeCards: Number(body.activeCards ?? existing?.activeCards ?? 0),
+      spend30dUsd: Number(body.spend30dUsd ?? existing?.spend30dUsd ?? 0),
+      approvalRate: Number(body.approvalRate ?? existing?.approvalRate ?? 0),
+      bufferUsd: Number(body.bufferUsd ?? existing?.bufferUsd ?? 0),
+      countries: asJson(body.countries ?? existing?.countries ?? []),
     };
     const row = await prisma.cardProgram.upsert({
       where: { id },
       create: { id, ...data },
       update: data,
     });
-    await audit(actor, "cards.program.upsert", id, `Upserted ${row.name}`);
-    return row;
+    invalidateCardFeesCache();
+    // subjectId FK is user-scoped — keep programme id in detail/meta only
+    await audit(actor, "cards.program.upsert", null, `Upserted ${row.name} (${id})`, {
+      programId: id,
+      issuanceFeeUsd: Number(row.issuanceFeeUsd),
+      fundFeeFlatUsd: Number(row.fundFeeFlatUsd),
+      fundFeeRate: Number(row.fundFeeRate),
+    });
+    return {
+      id: row.id,
+      name: row.name,
+      network: row.network,
+      processor: row.processor,
+      bin: row.bin,
+      currency: row.currency,
+      formFactor: row.formFactor,
+      issuanceFeeUsd: Number(row.issuanceFeeUsd),
+      monthlyFeeUsd: Number(row.monthlyFeeUsd),
+      fxMarkupPct: Number(row.fxMarkupPct),
+      fundFeeFlatUsd: Number(row.fundFeeFlatUsd),
+      fundFeeRate: Number(row.fundFeeRate),
+      minFundUsd: Number(row.minFundUsd),
+      defaultInitialLoadUsd: Number(row.defaultInitialLoadUsd),
+      minRetainBalanceUsd: Number(row.minRetainBalanceUsd),
+      status: row.status,
+      cardsIssued: row.cardsIssued,
+      activeCards: row.activeCards,
+      spend30dUsd: Number(row.spend30dUsd),
+      approvalRate: Number(row.approvalRate),
+      bufferUsd: Number(row.bufferUsd),
+      countries: Array.isArray(row.countries) ? row.countries : [],
+    };
   }
 
   /** Drop prototype seed rows (no linked user) so the admin stream is never fake. */
@@ -763,9 +880,11 @@ export class AdminModulesService {
     for (const o of pendingOrders) {
       const net = (o.network ?? "").toLowerCase();
       if (!net) continue;
-      if (o.side === "RECEIVE" || o.side === "BUY") {
+      // CryptoOrderSide is BUY|SELL; SEND/RECEIVE kept for forward-compat if enum expands.
+      const side = String(o.side);
+      if (side === "RECEIVE" || side === "BUY") {
         pendingIn.set(net, (pendingIn.get(net) ?? 0) + 1);
-      } else if (o.side === "SEND" || o.side === "SELL") {
+      } else if (side === "SEND" || side === "SELL") {
         pendingOut.set(net, (pendingOut.get(net) ?? 0) + 1);
       }
     }
@@ -826,14 +945,11 @@ export class AdminModulesService {
       ETH: 900_000,
       USDT: 5_000_000,
     };
-    const [holdings, configs, rates] = await Promise.all([
-      prisma.wallet.groupBy({
-        by: ["currency"],
-        where: { currency: { in: ["BTC", "ETH", "USDT"] } },
-        _sum: { available: true, pending: true },
-      }),
+    const cryptoMod = await import("../../crypto/services/crypto.service.js");
+    const [holdBy, configs, rates] = await Promise.all([
+      cryptoMod.cryptoService.aggregateCustomerHoldings(),
       prisma.cryptoExposure.findMany(),
-      import("../../crypto/services/crypto.service.js").then((m) => m.cryptoService.rates()).catch(() => []),
+      cryptoMod.cryptoService.rates().catch(() => []),
     ]);
     const configBy = new Map(configs.map((c) => [c.asset.toUpperCase(), c]));
     const rateBy = new Map(
@@ -844,7 +960,7 @@ export class AdminModulesService {
     );
 
     const codes = new Set<string>([
-      ...holdings.map((h) => String(h.currency).toUpperCase()),
+      ...[...holdBy.entries()].filter(([, h]) => h.customerHoldings > 0).map(([c]) => c),
       ...configs.map((c) => c.asset.toUpperCase()),
     ]);
     if (!codes.size) {
@@ -852,8 +968,7 @@ export class AdminModulesService {
     }
 
     return [...codes].sort().map((asset) => {
-      const hold = holdings.find((h) => String(h.currency).toUpperCase() === asset);
-      const coin = Number(hold?._sum.available ?? 0) + Number(hold?._sum.pending ?? 0);
+      const coin = holdBy.get(asset)?.customerHoldings ?? 0;
       const px = rateBy.get(asset) ?? (asset === "USDT" || asset === "USDC" ? 1 : 0);
       const cfg = configBy.get(asset);
       return {

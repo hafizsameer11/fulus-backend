@@ -361,21 +361,23 @@ export class AdminConsoleService {
 
     const groups: Record<string, { name: string; group: string; provider: string }> = {
       WITHDRAWAL: { name: "NGN bank payout", group: "Banking", provider: "Flutterwave" },
-      DEPOSIT: { name: "Virtual accounts", group: "Banking", provider: "Busha / FLW" },
+      DEPOSIT: { name: "Virtual accounts", group: "Banking", provider: "Busha" },
       CARD_FUND: { name: "Card processor", group: "Cards", provider: "Pagocards" },
       CRYPTO_BUY: { name: "Crypto rail", group: "Crypto", provider: "Busha" },
-      BILL_PAYMENT: { name: "Biller aggregator", group: "Bills", provider: "Flutterwave" },
+      BILL_PAYMENT: { name: "Biller aggregator", group: "Bills", provider: "Strowallet" },
       ESIM_PURCHASE: { name: "eSIM provisioning", group: "eSIM", provider: "eSIM Go" },
       SWAP: { name: "FX rate feed", group: "Finance", provider: "Internal" },
     };
 
     const rails = Object.entries(groups).map(([type, meta], i) => {
       const rows = txs.filter((t) => t.type === type);
-      const total = rows.reduce((s, r) => s + r._count, 0) || 1;
+      const total = rows.reduce((s, r) => s + r._count, 0);
       const ok = rows.filter((r) => r.status === "SUCCESS").reduce((s, r) => s + r._count, 0);
-      const successRate = (ok / total) * 100;
-      const status = successRate < 50 ? "down" : successRate < 95 ? "degraded" : "healthy";
-      const provider = rows[0]?.provider ?? meta.provider;
+      // No traffic in the window is not a failure — treat as healthy with full rate.
+      const successRate = total === 0 ? 100 : (ok / total) * 100;
+      const status =
+        total === 0 ? "healthy" : successRate < 50 ? "down" : successRate < 95 ? "degraded" : "healthy";
+      const provider = rows.find((r) => r.provider)?.provider ?? meta.provider;
       return {
         id: type.toLowerCase(),
         name: meta.name,

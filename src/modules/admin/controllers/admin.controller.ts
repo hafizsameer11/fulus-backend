@@ -3,10 +3,11 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { UnauthorizedError } from "../../../lib/errors.js";
 import { ok } from "../../../lib/http.js";
-import { signAdminToken } from "../../../middleware/admin.js";
+import { signAdminMfaPendingToken, signAdminToken } from "../../../middleware/admin.js";
 import { prisma } from "../../../lib/prisma.js";
 import { kycService } from "../../kyc/services/kyc.service.js";
 import { killSwitchService, putKillSwitchesSchema } from "../services/kill-switch.service.js";
+import { adminMfaService } from "../services/admin-mfa.service.js";
 import { adminReplySchema, supportService } from "../../support/services/support.service.js";
 
 const loginSchema = z.object({
@@ -14,8 +15,12 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+const codeSchema = z.object({
+  code: z.string().min(6).max(64),
+});
+
 export class AdminAuthController {
-  /** Simple email/password against seeded AdminUser. */
+  /** Email/password against AdminUser. MFA challenge only when authenticator is enrolled. */
   login = async (req: Request, res: Response) => {
     const input = loginSchema.parse(req.body ?? {});
     const email = input.email.trim().toLowerCase();
@@ -34,29 +39,90 @@ export class AdminAuthController {
       name: admin.name,
       role: admin.role,
     };
+
+    if (admin.totpEnabled && admin.totpSecret) {
+      const token = signAdminMfaPendingToken(staff);
+      return ok(res, { token, staff, expiresIn: "10m", requiresMfa: true, mfaEnabled: true });
+    }
+
     const token = signAdminToken(staff);
-    return ok(res, { token, staff, expiresIn: "8h", requiresMfa: true });
+    return ok(res, { token, staff, expiresIn: "8h", requiresMfa: false, mfaEnabled: false });
   };
 
-  /** Prototype MFA: any 6-digit TOTP or backup code ≥ 8 chars after a valid staff JWT. */
+  /** Complete MFA challenge with TOTP or a one-time backup code. */
   mfa = async (req: Request, res: Response) => {
-    if (!req.admin) throw new UnauthorizedError("Sign in required");
-    const body = z
-      .object({
-        code: z.string().min(6).max(64),
-      })
-      .parse(req.body ?? {});
-    const digits = body.code.replace(/\s/g, "");
-    const okCode = /^\d{6}$/.test(digits) || digits.length >= 8;
-    if (!okCode) {
-      throw new UnauthorizedError("Invalid authenticator or backup code");
-    }
-    return ok(res, { ok: true, staff: req.admin });
+    const pending = req.adminMfaPending;
+    if (!pending) throw new UnauthorizedError("Sign in required");
+    const body = codeSchema.parse(req.body ?? {});
+    await adminMfaService.verifyLogin(pending.id, body.code);
+    const staff = {
+      id: pending.id,
+      email: pending.email,
+      name: pending.name,
+      role: pending.role,
+    };
+    const token = signAdminToken(staff);
+    return ok(res, { ok: true, token, staff, expiresIn: "8h" });
   };
 
   me = async (req: Request, res: Response) => {
     if (!req.admin) throw new UnauthorizedError();
-    return ok(res, { staff: req.admin });
+    // Refresh role/active from DB so offboard / role changes apply without waiting for JWT expiry
+    const row =
+      req.admin.id === "api-key"
+        ? null
+        : await prisma.adminUser.findUnique({
+            where: { id: req.admin.id },
+            select: { id: true, email: true, name: true, role: true, active: true },
+          });
+    if (row && !row.active) throw new UnauthorizedError("Account deactivated");
+    const staff = row
+      ? { id: row.id, email: row.email, name: row.name, role: row.role, kind: "staff" as const }
+      : req.admin;
+    const mfa = await adminMfaService.status(staff.id).catch(() => null);
+    return ok(res, {
+      staff,
+      mfa: mfa
+        ? { enabled: mfa.enabled, enrolledAt: mfa.enrolledAt, lastUsedAt: mfa.lastUsedAt }
+        : { enabled: false, enrolledAt: null, lastUsedAt: null },
+    });
+  };
+
+  mfaStatus = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    return ok(res, await adminMfaService.status(req.admin.id));
+  };
+
+  mfaSetup = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    return ok(res, await adminMfaService.beginSetup(req.admin.id, req.admin.email));
+  };
+
+  mfaConfirm = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const body = codeSchema.parse(req.body ?? {});
+    return ok(res, await adminMfaService.confirmSetup(req.admin.id, body.code, req.admin.email));
+  };
+
+  mfaDisable = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const body = codeSchema.parse(req.body ?? {});
+    return ok(res, await adminMfaService.disable(req.admin.id, body.code, req.admin.email));
+  };
+
+  mfaRegenBackup = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const body = codeSchema.parse(req.body ?? {});
+    return ok(res, await adminMfaService.regenerateBackupCodes(req.admin.id, body.code, req.admin.email));
+  };
+
+  mfaAdminReset = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const id = String(req.params.id ?? "");
+    return ok(
+      res,
+      await adminMfaService.adminReset(id, req.admin.id, req.admin.email, req.admin.role),
+    );
   };
 }
 

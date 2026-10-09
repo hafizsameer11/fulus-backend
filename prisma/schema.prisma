@@ -318,14 +318,23 @@ model PlatformConfig {
 
 /// Console staff — simple email/password login (seeded).
 model AdminUser {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  passwordHash String
-  name         String
-  role         String   @default("super_admin")
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id               String    @id @default(cuid())
+  email            String    @unique
+  passwordHash     String
+  name             String
+  role             String    @default("super_admin")
+  active           Boolean   @default(true)
+  /// Base32 TOTP secret when MFA is enabled
+  totpSecret       String?
+  /// Temporary secret during enrol before confirm
+  totpPendingSecret String?
+  totpEnabled      Boolean   @default(false)
+  /// JSON array of bcrypt-hashed one-time backup codes
+  totpBackupHashes String?   @db.LongText
+  totpEnrolledAt   DateTime?
+  totpLastUsedAt   DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
 
 model Wallet {
@@ -1041,25 +1050,32 @@ model DsrRequest {
 }
 
 model CardProgram {
-  id             String   @id @default(cuid())
-  name           String
-  network        String
-  processor      String   @default("")
-  bin            String   @default("")
-  currency       String   @default("USD")
-  formFactor     String   @default("virtual")
-  issuanceFeeUsd Decimal  @default(0) @db.Decimal(24, 2)
-  monthlyFeeUsd  Decimal  @default(0) @db.Decimal(24, 2)
-  fxMarkupPct    Decimal  @default(0) @db.Decimal(8, 4)
-  status         String   @default("live")
-  cardsIssued    Int      @default(0)
-  activeCards    Int      @default(0)
-  spend30dUsd    Decimal  @default(0) @db.Decimal(24, 2)
-  approvalRate   Decimal  @default(0) @db.Decimal(8, 4)
-  bufferUsd      Decimal  @default(0) @db.Decimal(24, 2)
-  countries      Json?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                    String   @id @default(cuid())
+  name                  String
+  network               String
+  processor             String   @default("")
+  bin                   String   @default("")
+  currency              String   @default("USD")
+  formFactor            String   @default("virtual")
+  issuanceFeeUsd        Decimal  @default(0) @db.Decimal(24, 2)
+  monthlyFeeUsd         Decimal  @default(0) @db.Decimal(24, 2)
+  fxMarkupPct           Decimal  @default(0) @db.Decimal(8, 4)
+  /** Flat top-up / fund fee charged to the customer (USD). */
+  fundFeeFlatUsd        Decimal  @default(0.15) @db.Decimal(24, 2)
+  /** Percent top-up fee as a rate (0.0075 = 0.75%). */
+  fundFeeRate           Decimal  @default(0.0075) @db.Decimal(8, 6)
+  minFundUsd            Decimal  @default(5) @db.Decimal(24, 2)
+  defaultInitialLoadUsd Decimal  @default(5) @db.Decimal(24, 2)
+  minRetainBalanceUsd   Decimal  @default(5) @db.Decimal(24, 2)
+  status                String   @default("live")
+  cardsIssued           Int      @default(0)
+  activeCards           Int      @default(0)
+  spend30dUsd           Decimal  @default(0) @db.Decimal(24, 2)
+  approvalRate          Decimal  @default(0) @db.Decimal(8, 4)
+  bufferUsd             Decimal  @default(0) @db.Decimal(24, 2)
+  countries             Json?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 }
 
 model CardAuthorization {

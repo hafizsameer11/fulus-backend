@@ -503,12 +503,42 @@ export class KycService {
   async adminGetEvidence(checkId: string) {
     const check = await prisma.kycCheck.findUnique({ where: { id: checkId } });
     if (!check) throw new NotFoundError("KYC check not found");
-    const result =
-      check.result && typeof check.result === "object" ? (check.result as Record<string, unknown>) : {};
-    const paths =
-      result.evidencePaths && typeof result.evidencePaths === "object"
-        ? (result.evidencePaths as Record<string, string>)
-        : {};
+
+    /** Selfie/ID may live on a sibling NIN/FACE row for the same user — merge all. */
+    const siblings = await prisma.kycCheck.findMany({
+      where: { userId: check.userId },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+
+    const paths: Record<string, string> = {};
+    const steps: Array<{
+      checkId: string;
+      type: string;
+      status: string;
+      failureReason: string | null;
+      at: string;
+    }> = [];
+
+    for (const row of siblings) {
+      steps.push({
+        checkId: row.id,
+        type: row.type,
+        status: row.status,
+        failureReason: row.failureReason,
+        at: row.createdAt.toISOString(),
+      });
+      const result =
+        row.result && typeof row.result === "object" ? (row.result as Record<string, unknown>) : {};
+      const rowPaths =
+        result.evidencePaths && typeof result.evidencePaths === "object"
+          ? (result.evidencePaths as Record<string, string>)
+          : {};
+      for (const [kind, relPath] of Object.entries(rowPaths)) {
+        if (relPath && !paths[kind]) paths[kind] = relPath;
+      }
+    }
+
     const files: Array<{ kind: string; path: string; mime: string; base64: string }> = [];
     for (const [kind, relPath] of Object.entries(paths)) {
       if (!relPath) continue;
@@ -521,10 +551,13 @@ export class KycService {
     }
     return {
       checkId: check.id,
+      userId: check.userId,
       type: check.type,
       status: check.status,
+      failureReason: check.failureReason,
       evidencePaths: paths,
       files,
+      steps,
     };
   }
 

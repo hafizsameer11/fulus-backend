@@ -331,43 +331,26 @@ export async function ensureAdminModulesSeed() {
   }
 
   if (progCount === 0) {
-    await prisma.cardProgram.createMany({
-      data: [
-        {
-          id: "PRG-001",
-          name: "Fulus Virtual USD",
-          network: "Visa",
-          processor: "Marqeta",
-          bin: "486236",
-          currency: "USD",
-          issuanceFeeUsd: 6,
-          monthlyFeeUsd: 0,
-          fxMarkupPct: 1.5,
-          status: "live",
-          cardsIssued: 41820,
-          activeCards: 28407,
-          spend30dUsd: 3940500,
-          approvalRate: 93.4,
-          bufferUsd: 640000,
-          countries: ["NG", "SA", "US", "GB", "EU"],
-        },
-        {
-          id: "PRG-003",
-          name: "Fulus Naira Card (pilot)",
-          network: "Mastercard",
-          processor: "Stripe Issuing",
-          bin: "539983",
-          currency: "NGN",
-          issuanceFeeUsd: 2,
-          status: "pilot",
-          cardsIssued: 1240,
-          activeCards: 980,
-          spend30dUsd: 96300,
-          approvalRate: 88.2,
-          bufferUsd: 45000,
-          countries: ["NG"],
-        },
-      ],
+    await prisma.cardProgram.create({
+      data: {
+        id: "PRG-PAGO-404",
+        name: "Fulus Virtual USD",
+        network: "Visa",
+        processor: "Pagocards",
+        bin: "404337",
+        currency: "USD",
+        formFactor: "virtual",
+        issuanceFeeUsd: 0.65,
+        monthlyFeeUsd: 0,
+        fxMarkupPct: 0,
+        status: "live",
+        cardsIssued: 0,
+        activeCards: 0,
+        spend30dUsd: 0,
+        approvalRate: 0,
+        bufferUsd: 0,
+        countries: ["NG", "SA", "US"],
+      },
     });
   }
 

@@ -6,10 +6,10 @@ import { makeReference } from "../../../lib/http.js";
 import { pagocardsClient } from "../../../providers/pagocards/client.js";
 import { PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
 import {
-  PAGO_VISA,
-  pagoVisaExtraFundUsd,
-  pagoVisaFundDebitUsd,
-  pagoVisaFundFeeUsd,
+  cardExtraFundUsd,
+  cardFundDebitUsd,
+  cardFundFeeUsd,
+  resolveCardFees,
 } from "../../../providers/pagocards/fees.js";
 import { extractPagoCardSecrets, pagoDisplayBalance, pagoPayloadData, pickPagoString } from "../../../providers/pagocards/parse.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
@@ -230,25 +230,26 @@ export class CardsService {
       throw new AppError("Complete your profile name before issuing a Visa card");
     }
 
-    const desiredOnCard = Math.round((input.initialFund ?? PAGO_VISA.defaultInitialLoadUsd) * 100) / 100;
-    if (desiredOnCard < PAGO_VISA.defaultInitialLoadUsd) {
-      throw new AppError(`Minimum card balance is $${PAGO_VISA.defaultInitialLoadUsd}`, 400);
+    const fees = await resolveCardFees();
+    const desiredOnCard = Math.round((input.initialFund ?? fees.defaultInitialLoadUsd) * 100) / 100;
+    if (desiredOnCard < fees.defaultInitialLoadUsd) {
+      throw new AppError(`Minimum card balance is $${fees.defaultInitialLoadUsd}`, 400);
     }
-    const extraFund = pagoVisaExtraFundUsd(desiredOnCard);
-    // Pagocards fund endpoint minimum is $5 — extras below that can't be topped up separately.
-    if (extraFund > 0 && extraFund < PAGO_VISA.minFundUsd) {
+    const extraFund = cardExtraFundUsd(desiredOnCard, fees.defaultInitialLoadUsd);
+    // Pagocards fund endpoint minimum — extras below that can't be topped up separately.
+    if (extraFund > 0 && extraFund < fees.minFundUsd) {
       throw new AppError(
-        `Choose $${PAGO_VISA.defaultInitialLoadUsd} or at least $${PAGO_VISA.defaultInitialLoadUsd + PAGO_VISA.minFundUsd} (fund minimum is $${PAGO_VISA.minFundUsd} above the default load)`,
+        `Choose $${fees.defaultInitialLoadUsd} or at least $${fees.defaultInitialLoadUsd + fees.minFundUsd} (fund minimum is $${fees.minFundUsd} above the default load)`,
         400,
       );
     }
 
-    const issuanceFee = PAGO_VISA.issuanceFeeUsd;
-    const defaultLoad = PAGO_VISA.defaultInitialLoadUsd;
-    const defaultLoadFee = pagoVisaFundFeeUsd(defaultLoad);
-    const defaultDebit = pagoVisaFundDebitUsd(defaultLoad);
-    const extraLoadFee = extraFund > 0 ? pagoVisaFundFeeUsd(extraFund) : 0;
-    const extraDebit = extraFund > 0 ? pagoVisaFundDebitUsd(extraFund) : 0;
+    const issuanceFee = fees.issuanceFeeUsd;
+    const defaultLoad = fees.defaultInitialLoadUsd;
+    const defaultLoadFee = cardFundFeeUsd(defaultLoad, fees);
+    const defaultDebit = cardFundDebitUsd(defaultLoad, fees);
+    const extraLoadFee = extraFund > 0 ? cardFundFeeUsd(extraFund, fees) : 0;
+    const extraDebit = extraFund > 0 ? cardFundDebitUsd(extraFund, fees) : 0;
     const live = usePagocardsLive();
 
     // Debit issuance + default Pagocards load (auto-applied on create — do not fund again).
@@ -525,12 +526,13 @@ export class CardsService {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundError("User not found");
 
-    if (input.amount < PAGO_VISA.minFundUsd) {
-      throw new AppError(`Minimum card fund is $${PAGO_VISA.minFundUsd}`, 400);
+    const fees = await resolveCardFees();
+    if (input.amount < fees.minFundUsd) {
+      throw new AppError(`Minimum card fund is $${fees.minFundUsd}`, 400);
     }
 
-    const loadFee = pagoVisaFundFeeUsd(input.amount);
-    const debitTotal = pagoVisaFundDebitUsd(input.amount);
+    const loadFee = cardFundFeeUsd(input.amount, fees);
+    const debitTotal = cardFundDebitUsd(input.amount, fees);
 
     // User pays card amount + Pagocards load fee ($0.15 + 0.75%); only `amount` is loaded on-card.
     const walletTx = await walletService.debit({
@@ -617,18 +619,19 @@ export class CardsService {
       throw new AppError("Unfreeze the card before withdrawing", 400);
     }
 
+    const fees = await resolveCardFees();
     const amount = Math.round(input.amount * 100) / 100;
     const balance = Number(card.balance);
-    const maxWithdraw = Math.round((balance - PAGO_VISA.minRetainBalanceUsd) * 100) / 100;
+    const maxWithdraw = Math.round((balance - fees.minRetainBalanceUsd) * 100) / 100;
     if (maxWithdraw <= 0) {
       throw new AppError(
-        `Card must keep at least $${PAGO_VISA.minRetainBalanceUsd}. Current balance is $${balance.toFixed(2)}.`,
+        `Card must keep at least $${fees.minRetainBalanceUsd}. Current balance is $${balance.toFixed(2)}.`,
         400,
       );
     }
     if (amount > maxWithdraw + 1e-9) {
       throw new AppError(
-        `Maximum withdrawable is $${maxWithdraw.toFixed(2)} (must leave $${PAGO_VISA.minRetainBalanceUsd} on the card)`,
+        `Maximum withdrawable is $${maxWithdraw.toFixed(2)} (must leave $${fees.minRetainBalanceUsd} on the card)`,
         400,
       );
     }

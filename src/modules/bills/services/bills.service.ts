@@ -262,6 +262,175 @@ export class BillsService {
     });
   }
 
+  /**
+   * Admin billers list: DB services (Strowallet codes) + rolling 7d vend stats
+   * + live plan counts from Strowallet for DATA/CABLE.
+   * Field names keep the `*24h` suffix for admin UI compatibility.
+   */
+  async adminListServices() {
+    const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [services, stats7d, stats24h, lastVends, catalog] = await Promise.all([
+      prisma.billService.findMany({
+        orderBy: [{ category: "asc" }, { name: "asc" }],
+        include: { _count: { select: { variations: true } } },
+      }),
+      prisma.billPayment.groupBy({
+        by: ["serviceId", "status"],
+        where: { createdAt: { gte: since7d } },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.billPayment.groupBy({
+        by: ["serviceId", "status"],
+        where: { createdAt: { gte: since24h } },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.billPayment.groupBy({
+        by: ["serviceId"],
+        _max: { createdAt: true },
+      }),
+      this.catalog().catch(() => [] as Awaited<ReturnType<BillsService["catalog"]>>),
+    ]);
+
+    const planCountBy = new Map(
+      catalog.map((s) => [s.id, Array.isArray(s.variations) ? s.variations.length : 0]),
+    );
+    const lastBy = new Map(lastVends.map((r) => [r.serviceId, r._max.createdAt]));
+
+    const fold = (rows: typeof stats7d) => {
+      const statsBy = new Map<string, { total: number; success: number; value: number }>();
+      for (const row of rows) {
+        const cur = statsBy.get(row.serviceId) ?? { total: 0, success: 0, value: 0 };
+        cur.total += row._count._all;
+        if (row.status === "SUCCESS") {
+          cur.success += row._count._all;
+          cur.value += Number(row._sum.amount ?? 0);
+        }
+        statsBy.set(row.serviceId, cur);
+      }
+      return statsBy;
+    };
+    const by7d = fold(stats7d);
+    const by24h = fold(stats24h);
+
+    return services.map(({ _count, isActive, ...s }) => {
+      // Prefer 7d for the board (sparse traffic); fall back to lifetime lastVend.
+      const st = by7d.get(s.id) ?? { total: 0, success: 0, value: 0 };
+      const st24 = by24h.get(s.id) ?? { total: 0, success: 0, value: 0 };
+      const successRate = st.total > 0 ? Math.round((st.success / st.total) * 1000) / 10 : null;
+      let status: "live" | "degraded" | "disabled" = isActive ? "live" : "disabled";
+      // Degrade on recent (24h) pain so an old bad day doesn't keep a route amber.
+      const rate24 = st24.total > 0 ? (st24.success / st24.total) * 100 : null;
+      if (isActive && st24.total >= 3 && rate24 != null && rate24 < 90) status = "degraded";
+      const livePlans = planCountBy.get(s.id);
+      return {
+        ...s,
+        provider: s.provider || "strowallet",
+        active: isActive,
+        status,
+        variationsCount: livePlans ?? _count.variations,
+        plansSource:
+          s.category === "DATA" || s.category === "CABLE"
+            ? useStrowalletLive()
+              ? "strowallet"
+              : "none"
+            : s.category === "AIRTIME" || s.category === "ELECTRICITY" || s.category === "BETTING"
+              ? "variable"
+              : "none",
+        volume24h: st.total,
+        success24h: st.success,
+        value24h: st.value,
+        successRate,
+        windowDays: 7,
+        lastVend: lastBy.get(s.id)?.toISOString() ?? null,
+      };
+    });
+  }
+
+  /**
+   * Admin products: live Strowallet DATA/CABLE plans (not DB seed rows),
+   * plus variable-amount placeholders for airtime / electricity / betting.
+   */
+  async adminListProducts() {
+    const [catalog, sold] = await Promise.all([
+      this.catalog(),
+      prisma.billPayment.groupBy({
+        by: ["serviceId", "variationCode"],
+        where: {
+          createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+          status: "SUCCESS",
+        },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    const soldBy = new Map<string, { count: number; value: number }>();
+    for (const row of sold) {
+      const key = `${row.serviceId}::${row.variationCode ?? "variable"}`;
+      soldBy.set(key, {
+        count: row._count._all,
+        value: Number(row._sum.amount ?? 0),
+      });
+    }
+
+    const products: Array<Record<string, unknown>> = [];
+    for (const svc of catalog) {
+      const variations = Array.isArray(svc.variations) ? svc.variations : [];
+      if (variations.length === 0) {
+        if (
+          svc.category === "AIRTIME" ||
+          svc.category === "ELECTRICITY" ||
+          svc.category === "BETTING" ||
+          svc.category === "EDUCATION"
+        ) {
+          const key = `${svc.id}::variable`;
+          const s = soldBy.get(key) ?? soldBy.get(`${svc.id}::`) ?? { count: 0, value: 0 };
+          products.push({
+            id: `${svc.id}:variable`,
+            code: "variable",
+            name: `${svc.name} (any amount)`,
+            amount: null,
+            isActive: svc.isActive,
+            serviceId: svc.id,
+            serviceName: svc.name,
+            category: svc.category,
+            provider: svc.provider || "strowallet",
+            serviceActive: svc.isActive,
+            source: "strowallet",
+            sold24h: s.count,
+            value24h: s.value,
+            createdAt: svc.createdAt,
+          });
+        }
+        continue;
+      }
+      for (const v of variations) {
+        const key = `${svc.id}::${v.code}`;
+        const s = soldBy.get(key) ?? { count: 0, value: 0 };
+        products.push({
+          id: `${svc.id}:${v.code}`,
+          code: v.code,
+          name: v.name,
+          amount: v.amount,
+          isActive: v.isActive !== false,
+          serviceId: svc.id,
+          serviceName: svc.name,
+          category: svc.category,
+          provider: svc.provider || "strowallet",
+          serviceActive: svc.isActive,
+          source: "strowallet",
+          sold24h: s.count,
+          value24h: s.value,
+          createdAt: svc.createdAt,
+        });
+      }
+    }
+    return products;
+  }
+
   async verifyMeter(input: z.infer<typeof verifyMeterSchema>) {
     if (!useStrowalletLive()) {
       throw new AppError("Meter verification is temporarily unavailable. Please try again later.", 503, "PROVIDER_UNAVAILABLE");

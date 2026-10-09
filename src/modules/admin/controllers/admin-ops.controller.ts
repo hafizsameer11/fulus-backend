@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
+import { z } from "zod";
 import { ok } from "../../../lib/http.js";
-import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { AppError, NotFoundError, UnauthorizedError } from "../../../lib/errors.js";
 import { prisma } from "../../../lib/prisma.js";
 import { parsePagination } from "../lib/pagination.js";
 import {
@@ -8,6 +9,36 @@ import {
   cryptoAssetConfigService,
 } from "../../crypto/services/crypto-asset-config.service.js";
 import { cryptoService } from "../../crypto/services/crypto.service.js";
+import { billsService } from "../../bills/services/bills.service.js";
+import { destinationsFromBundles, esimService } from "../../esim/services/esim.service.js";
+import { ADMIN_ROLES } from "../lib/roles.js";
+import { adminStaffService } from "../services/admin-staff.service.js";
+
+const roleEnum = z.enum([
+  "super_admin",
+  "support_agent",
+  "support_lead",
+  "compliance",
+  "payment_ops",
+  "finance",
+  "growth",
+  "product_admin",
+  "auditor",
+]);
+
+const inviteStaffSchema = z.object({
+  email: z.string().email(),
+  name: z.string().min(2).max(120),
+  role: roleEnum,
+  password: z.string().min(10).max(128).optional(),
+});
+
+const patchStaffSchema = z.object({
+  name: z.string().min(2).max(120).optional(),
+  role: roleEnum.optional(),
+  active: z.boolean().optional(),
+  password: z.string().min(10).max(128).optional(),
+});
 
 function userDisplayName(user: { firstName: string | null; lastName: string | null; email: string }) {
   const name = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
@@ -184,49 +215,11 @@ export class AdminOpsController {
   };
 
   listBillServices = async (_req: Request, res: Response) => {
-    const services = await prisma.billService.findMany({
-      orderBy: [{ category: "asc" }, { name: "asc" }],
-      include: {
-        variations: { orderBy: { name: "asc" } },
-        _count: { select: { variations: true } },
-      },
-    });
-    return ok(res, {
-      services: services.map(({ _count, variations, isActive, ...s }) => ({
-        ...s,
-        active: isActive,
-        variationsCount: _count.variations,
-        variations: variations.map((v) => ({
-          id: v.id,
-          code: v.code,
-          name: v.name,
-          amount: v.amount != null ? Number(v.amount) : null,
-          isActive: v.isActive,
-        })),
-      })),
-    });
+    return ok(res, { services: await billsService.adminListServices() });
   };
 
   listBillProducts = async (_req: Request, res: Response) => {
-    const variations = await prisma.billVariation.findMany({
-      orderBy: [{ serviceId: "asc" }, { name: "asc" }],
-      include: { service: { select: { id: true, name: true, category: true, provider: true, isActive: true } } },
-    });
-    return ok(res, {
-      products: variations.map(({ service, ...v }) => ({
-        id: v.id,
-        code: v.code,
-        name: v.name,
-        amount: v.amount != null ? Number(v.amount) : null,
-        isActive: v.isActive,
-        serviceId: service.id,
-        serviceName: service.name,
-        category: service.category,
-        provider: service.provider,
-        serviceActive: service.isActive,
-        createdAt: v.createdAt,
-      })),
-    });
+    return ok(res, { products: await billsService.adminListProducts() });
   };
 
   getBillPayment = async (req: Request, res: Response) => {
@@ -410,43 +403,26 @@ export class AdminOpsController {
   };
 
   listCryptoWallets = async (_req: Request, res: Response) => {
-    const rows = await prisma.wallet.groupBy({
-      by: ["currency"],
-      where: { currency: { in: ["BTC", "ETH", "USDT"] } },
-      _sum: { available: true, pending: true },
-      _count: true,
-    });
-    return ok(res, {
-      wallets: rows.map((r) => ({
-        currency: r.currency,
-        available: Number(r._sum?.available ?? 0),
-        pending: Number(r._sum?.pending ?? 0),
-        holders: r._count,
-      })),
-    });
+    const holdBy = await cryptoService.aggregateCustomerHoldings();
+    const wallets = [...holdBy.entries()]
+      .filter(([, h]) => h.customerHoldings > 0 || h.holders > 0)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([currency, h]) => ({
+        currency,
+        available: Math.max(0, h.customerHoldings - h.pending),
+        pending: h.pending,
+        holders: h.holders,
+      }));
+    return ok(res, { wallets });
   };
 
   /** Asset registry: Busha mid + Fulus buy/sell spreads + customer holdings. */
   listCryptoAssets = async (_req: Request, res: Response) => {
-    const [rates, configs, holdings] = await Promise.all([
+    const [rates, configs, holdBy] = await Promise.all([
       cryptoService.rates(),
       cryptoAssetConfigService.list(),
-      prisma.wallet.groupBy({
-        by: ["currency"],
-        where: { currency: { in: ["BTC", "ETH", "USDT"] } },
-        _sum: { available: true, pending: true },
-        _count: true,
-      }),
+      cryptoService.aggregateCustomerHoldings(),
     ]);
-    const holdBy = new Map<string, { customerHoldings: number; holders: number }>(
-      holdings.map((h) => [
-        String(h.currency),
-        {
-          customerHoldings: Number(h._sum.available ?? 0) + Number(h._sum.pending ?? 0),
-          holders: h._count,
-        },
-      ]),
-    );
     const rateBy = new Map(
       (rates as Array<Record<string, unknown>>).map((r) => [String(r.currency).toUpperCase(), r]),
     );
@@ -584,6 +560,144 @@ export class AdminOpsController {
     });
   };
 
+  /**
+   * Live eSIM Go catalogue for ops, overlaid with DB sold/stock counts.
+   * Never returns admin UI demo seed rows.
+   */
+  esimCatalogue = async (req: Request, res: Response) => {
+    const query = Object.fromEntries(
+      Object.entries(req.query).map(([k, v]) => [k, Array.isArray(v) ? String(v[0]) : String(v ?? "")]),
+    );
+    const catalogue = await esimService.catalogue(query);
+    const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const [orders30d, esims] = await Promise.all([
+      prisma.esimOrder.findMany({
+        where: { createdAt: { gte: since30d } },
+        select: { bundleName: true, status: true },
+      }),
+      prisma.esim.findMany({
+        select: { bundleName: true, status: true },
+      }),
+    ]);
+
+    const soldBy = new Map<string, number>();
+    for (const o of orders30d) {
+      const key = o.bundleName || "unknown";
+      soldBy.set(key, (soldBy.get(key) ?? 0) + 1);
+    }
+
+    const stockBy = new Map<string, number>();
+    for (const e of esims) {
+      const key = e.bundleName || "unknown";
+      const st = String(e.status).toUpperCase();
+      if (st === "FAILED" || st === "EXPIRED" || st === "CANCELLED") continue;
+      stockBy.set(key, (stockBy.get(key) ?? 0) + 1);
+    }
+
+    const mode = String(query.mode || "destinations").toLowerCase();
+
+    const bundlePlans = catalogue.bundles.map((b) => {
+      const networks = b.countries.flatMap((c) => (c.networks ?? []).map((n) => n.brandName || n.name)).filter(Boolean);
+      const carrier = networks[0] || "eSIM Go";
+      const primaryIso = b.countries[0]?.iso ?? "";
+      const region =
+        b.countries.length === 1
+          ? b.countries[0]!.name
+          : b.countries[0]?.region || b.description || b.name;
+      const priceUsd = Number(b.price) || 0;
+      return {
+        id: b.name,
+        bundleName: b.name,
+        description: b.description,
+        region,
+        flagIso: primaryIso,
+        countries: b.countries.length,
+        dataMb: b.dataMb,
+        unlimited: b.unlimited,
+        days: b.days,
+        priceUsd,
+        costUsd: Math.round(priceUsd * 0.7 * 100) / 100,
+        carrier,
+        inventory: stockBy.get(b.name) ?? 0,
+        reorderAt: 0,
+        sold30d: soldBy.get(b.name) ?? 0,
+        enabled: true,
+        provider: catalogue.provider,
+        currency: b.currency || "USD",
+        countryList: b.countries.map((c) => ({ iso: c.iso, name: c.name })),
+        planCount: 1,
+      };
+    });
+
+    /** Destination cards for the desk (same grouping as the consumer app). */
+    const dests = catalogue.destinations?.length
+      ? catalogue.destinations
+      : destinationsFromBundles(catalogue.bundles);
+
+    // Aggregate DB stats onto destinations via bundle membership (iso / region key).
+    const destPlans = dests.map((d) => {
+      const memberBundles = catalogue.bundles.filter((b) => {
+        if (d.iso) {
+          return b.countries.some((c) => c.iso.toLowerCase() === d.iso!.toLowerCase());
+        }
+        // Regional / global groups: match region label or multi-country emblem destinations
+        const regionHit = b.countries.some((c) => c.region.toLowerCase() === d.regionLabel.toLowerCase());
+        if (d.key === "gl" || d.emblem === "global") return b.countries.length >= 10;
+        if (d.emblem === "africa" || d.key === "af") {
+          return b.countries.length > 1 && b.countries.every((c) => c.region.toLowerCase().includes("africa"));
+        }
+        if (d.key === "eu" || d.name === "Europe") {
+          return b.countries.length > 1 && b.countries.every((c) => c.region.toLowerCase().includes("europe"));
+        }
+        return regionHit && b.countries.length === 1;
+      });
+      const names = new Set(memberBundles.map((b) => b.name));
+      let sold30d = 0;
+      let inventory = 0;
+      for (const name of names) {
+        sold30d += soldBy.get(name) ?? 0;
+        inventory += stockBy.get(name) ?? 0;
+      }
+      // Fallback: if membership filter was too strict, use destination planCount only
+      const priceUsd = Number(d.from) || 0;
+      return {
+        id: `dest:${d.key}`,
+        bundleName: d.key,
+        description: `${d.planCount} eSIM Go bundles`,
+        region: d.name,
+        flagIso: (d.iso || "").toUpperCase(),
+        countries: d.countries,
+        dataMb: 0,
+        unlimited: false,
+        days: 0,
+        priceUsd,
+        costUsd: Math.round(priceUsd * 0.7 * 100) / 100,
+        carrier: "eSIM Go",
+        inventory,
+        reorderAt: 0,
+        sold30d,
+        enabled: true,
+        provider: catalogue.provider,
+        currency: "USD",
+        countryList: d.countryList ?? [],
+        planCount: d.planCount,
+      };
+    });
+
+    const plans = mode === "bundles" ? bundlePlans : destPlans;
+
+    return ok(res, {
+      plans,
+      bundles: bundlePlans.length,
+      destinations: dests.length,
+      provider: catalogue.provider,
+      simulated: catalogue.simulated,
+      count: plans.length,
+      mode: mode === "bundles" ? "bundles" : "destinations",
+    });
+  };
+
   listReferrals = async (req: Request, res: Response) => {
     const { page, limit, skip } = parsePagination(req);
     const [total, items] = await Promise.all([
@@ -644,18 +758,30 @@ export class AdminOpsController {
   };
 
   listStaff = async (_req: Request, res: Response) => {
-    const staff = await prisma.adminUser.findMany({
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        active: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    return ok(res, { staff: await adminStaffService.list(), roles: ADMIN_ROLES });
+  };
+
+  createStaff = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const input = inviteStaffSchema.parse(req.body ?? {});
+    const result = await adminStaffService.create(req.admin, input);
+    return ok(res, result, 201);
+  };
+
+  patchStaff = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const id = String(req.params.id ?? "");
+    if (!id) throw new AppError("Staff id required", 400);
+    const input = patchStaffSchema.parse(req.body ?? {});
+    const staff = await adminStaffService.update(req.admin, id, input);
+    return ok(res, { staff });
+  };
+
+  offboardStaff = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const id = String(req.params.id ?? "");
+    if (!id) throw new AppError("Staff id required", 400);
+    const staff = await adminStaffService.offboard(req.admin, id);
     return ok(res, { staff });
   };
 

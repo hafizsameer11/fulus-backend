@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { ok } from "../../../lib/http.js";
 import { adminModulesService } from "../services/admin-modules.service.js";
+import { adminDeskService } from "../services/admin-desk.service.js";
 
 function actor(req: Request) {
   return (req as { admin?: { email?: string } }).admin?.email ?? "admin";
@@ -307,6 +308,48 @@ export class AdminModulesController {
     const reports = await adminModulesService.putSavedReports(list, actor(req));
     return ok(res, { report: next, reports });
   };
+
+  /* ---------------------------- Desk / overview ---------------------------- */
+
+  dayClose = async (_req: Request, res: Response) => ok(res, await adminDeskService.dayClose());
+
+  putDayCloseOverrides = async (req: Request, res: Response) =>
+    ok(res, await adminDeskService.putDayCloseOverrides((req.body?.overrides ?? req.body) as Record<string, boolean>));
+
+  listInvoices = async (_req: Request, res: Response) => ok(res, await adminDeskService.listInvoices());
+
+  putInvoices = async (req: Request, res: Response) =>
+    ok(res, await adminDeskService.putInvoices((req.body?.invoices ?? req.body) as never));
+
+  analyticsAnomalies = async (_req: Request, res: Response) =>
+    ok(res, await adminDeskService.analyticsAnomalies());
+
+  putAnomalySubs = async (req: Request, res: Response) =>
+    ok(res, await adminDeskService.putAnomalySubs((req.body?.subs ?? req.body) as Record<string, boolean>));
+
+  analyticsExports = async (_req: Request, res: Response) =>
+    ok(res, await adminDeskService.analyticsExports());
+
+  recordAnalyticsExport = async (req: Request, res: Response) =>
+    ok(
+      res,
+      await adminDeskService.recordAnalyticsExport({
+        ...(req.body ?? {}),
+        by: actor(req),
+      }),
+      201,
+    );
+
+  analyticsPipelines = async (_req: Request, res: Response) =>
+    ok(res, await adminDeskService.analyticsPipelines());
+
+  referralConfig = async (_req: Request, res: Response) =>
+    ok(res, await adminDeskService.referralConfig());
+
+  putReferralConfig = async (req: Request, res: Response) =>
+    ok(res, await adminDeskService.putReferralConfig((req.body ?? {}) as Record<string, unknown>));
+
+  treasury = async (_req: Request, res: Response) => ok(res, await adminDeskService.treasury());
 }
 
 export const adminModulesController = new AdminModulesController();
