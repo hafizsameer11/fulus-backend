@@ -11,6 +11,7 @@ import { flutterwaveClient, flutterwaveLive } from "../../../providers/flutterwa
 import { bushaFloatService } from "../../../providers/busha/float.js";
 import { simulateProviders, useBushaLive } from "../../../lib/simulate.js";
 import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
+import { cardFundDebitUsd, resolveCardFees } from "../../../providers/pagocards/fees.js";
 
 /** Card processing fee shown in the deposit UI (1.5%). */
 export const CARD_FEE_BPS = 150;
@@ -531,6 +532,9 @@ button:active{opacity:.85}button:disabled{opacity:.5}
   async initiateBushaNgnDeposit(userId: string, input: z.infer<typeof bushaNgnDepositSchema>) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.DEPOSITS, "Deposits are temporarily disabled");
     const master = await bushaFloatService.createMasterNgnDeposit(input.amount);
+    const cardFees = input.purpose === "card_fund" && input.usdAmount ? await resolveCardFees() : null;
+    const debitTotalUsd =
+      cardFees && input.usdAmount ? cardFundDebitUsd(input.usdAmount, cardFees) : null;
     const deposit = await prisma.deposit.create({
       data: {
         userId,
@@ -564,6 +568,7 @@ button:active{opacity:.85}button:disabled{opacity:.5}
                 purpose: "card_fund",
                 cardId: input.cardId,
                 usdAmount: input.usdAmount,
+                debitTotalUsd,
               }
             : {}),
         }),
@@ -598,13 +603,79 @@ button:active{opacity:.85}button:disabled{opacity:.5}
       },
     });
     if (!deposit) return null;
-    if (deposit.status === "SUCCESS") return { deposit, alreadySettled: true };
 
     const meta = asRecord(deposit.metadata);
     const creditAmount =
       opts.creditedAmount ??
       Number(meta.targetAmount ?? deposit.amount ?? 0);
     if (!(creditAmount > 0)) throw new AppError("Invalid deposit credit amount");
+
+    const finishCardFund = async (depositId: string, userId: string, settledMeta: Record<string, unknown>) => {
+      if (
+        settledMeta.purpose === "card_fund" &&
+        settledMeta.cardId &&
+        settledMeta.usdAmount &&
+        !settledMeta.cardFundSettled
+      ) {
+        return this.settleCardFundAfterDeposit({
+          depositId,
+          userId,
+          cardId: String(settledMeta.cardId),
+          usdAmount: Number(settledMeta.usdAmount),
+          ngnCredit: creditAmount,
+        });
+      }
+      return null;
+    };
+
+    if (deposit.status === "SUCCESS") {
+      const cardFund = await finishCardFund(deposit.id, deposit.userId, meta);
+      return { deposit, alreadySettled: true, cardFund };
+    }
+
+    // Claim row so concurrent webhooks cannot double-credit.
+    const claimed = await prisma.deposit.updateMany({
+      where: { id: deposit.id, status: "PENDING" },
+      data: { status: "PROCESSING" },
+    });
+
+    const existingTx = await prisma.transaction.findFirst({
+      where: {
+        userId: deposit.userId,
+        type: "DEPOSIT",
+        providerRef: opts.transferId,
+        status: "SUCCESS",
+      },
+    });
+
+    if (existingTx) {
+      const updated = await prisma.deposit.update({
+        where: { id: deposit.id },
+        data: {
+          status: "SUCCESS",
+          amount: creditAmount,
+          transactionId: existingTx.id,
+          confirmedAt: deposit.confirmedAt ?? new Date(),
+          metadata: asJson({
+            ...meta,
+            settledAt: new Date().toISOString(),
+            webhook: opts.webhook ?? null,
+          }),
+        },
+      });
+      const cardFund = await finishCardFund(updated.id, deposit.userId, asRecord(updated.metadata));
+      return { deposit: updated, transaction: existingTx, alreadySettled: true, cardFund };
+    }
+
+    if (claimed.count === 0) {
+      // Another worker holds PROCESSING — avoid racing a second credit.
+      const fresh = await prisma.deposit.findUnique({ where: { id: deposit.id } });
+      if (fresh?.status === "SUCCESS") {
+        const cardFund = await finishCardFund(fresh.id, deposit.userId, asRecord(fresh.metadata));
+        return { deposit: fresh, alreadySettled: true, cardFund };
+      }
+      return { deposit: fresh ?? deposit, alreadySettled: true, inFlight: true };
+    }
 
     const transaction = await walletService.credit({
       userId: deposit.userId,
@@ -637,29 +708,17 @@ button:active{opacity:.85}button:disabled{opacity:.5}
       },
     });
 
+    const isCardFund = meta.purpose === "card_fund";
     await createInboxMessage({
       userId: deposit.userId,
-      category: "wallet",
-      title: "Deposit confirmed",
-      body: `₦${creditAmount.toLocaleString()} was added to your NGN wallet.`,
+      category: isCardFund ? "cards" : "wallet",
+      title: isCardFund ? "Bank transfer received" : "Deposit confirmed",
+      body: isCardFund
+        ? `₦${creditAmount.toLocaleString()} received — loading your card next.`
+        : `₦${creditAmount.toLocaleString()} was added to your NGN wallet.`,
     });
 
-    let cardFund: unknown = null;
-    if (
-      meta.purpose === "card_fund" &&
-      meta.cardId &&
-      meta.usdAmount &&
-      !meta.cardFundSettled
-    ) {
-      cardFund = await this.settleCardFundAfterDeposit({
-        depositId: deposit.id,
-        userId: deposit.userId,
-        cardId: String(meta.cardId),
-        usdAmount: Number(meta.usdAmount),
-        ngnCredit: creditAmount,
-      });
-    }
-
+    const cardFund = await finishCardFund(updated.id, deposit.userId, asRecord(updated.metadata));
     return { deposit: updated, transaction, alreadySettled: false, cardFund };
   }
 
@@ -673,12 +732,28 @@ button:active{opacity:.85}button:disabled{opacity:.5}
   }) {
     const { cardsService } = await import("../../cards/services/cards.service.js");
     try {
+      const fees = await resolveCardFees();
+      const debitTotal = cardFundDebitUsd(opts.usdAmount, fees);
+
       await fxService.executeSwap(opts.userId, {
         fromCurrency: "NGN",
         toCurrency: "USD",
         amount: opts.ngnCredit,
         idempotencyKey: `card-fund-swap-${opts.depositId}`,
       });
+
+      const usdWallet = await prisma.wallet.findUnique({
+        where: { userId_currency: { userId: opts.userId, currency: "USD" } },
+      });
+      const available = Number(usdWallet?.available ?? 0);
+      if (available + 1e-6 < debitTotal) {
+        throw new AppError(
+          `Need $${debitTotal.toFixed(2)} USD (card + fee) but only $${available.toFixed(2)} after conversion. Top up from your wallet.`,
+          400,
+          "CARD_FUND_SHORT",
+        );
+      }
+
       const funded = await cardsService.fund(
         opts.userId,
         opts.cardId,
@@ -686,7 +761,7 @@ button:active{opacity:.85}button:disabled{opacity:.5}
           amount: opts.usdAmount,
           currency: "USD",
         },
-        { skipPinCheck: true },
+        { skipPinCheck: true, idempotencyKey: `card-fund-${opts.depositId}` },
       );
       const deposit = await prisma.deposit.findUnique({ where: { id: opts.depositId } });
       const meta = asRecord(deposit?.metadata);
@@ -697,6 +772,7 @@ button:active{opacity:.85}button:disabled{opacity:.5}
             ...meta,
             cardFundSettled: true,
             cardFundSettledAt: new Date().toISOString(),
+            debitTotalUsd: debitTotal,
           }),
         },
       });
@@ -704,18 +780,31 @@ button:active{opacity:.85}button:disabled{opacity:.5}
         userId: opts.userId,
         category: "cards",
         title: "Card topped up",
-        body: `$${opts.usdAmount.toFixed(2)} was loaded onto your card after your bank transfer cleared.`,
+        body: `$${opts.usdAmount.toFixed(2)} was loaded onto your card (fee $${(debitTotal - opts.usdAmount).toFixed(2)}).`,
       });
       return funded;
     } catch (err) {
       console.error("[deposits] card fund after bank deposit failed", err);
+      const deposit = await prisma.deposit.findUnique({ where: { id: opts.depositId } });
+      const meta = asRecord(deposit?.metadata);
+      await prisma.deposit.update({
+        where: { id: opts.depositId },
+        data: {
+          metadata: asJson({
+            ...meta,
+            cardFundSettled: false,
+            cardFundError: err instanceof Error ? err.message : "card_fund_failed",
+            cardFundLastAttemptAt: new Date().toISOString(),
+          }),
+        },
+      });
       await createInboxMessage({
         userId: opts.userId,
         category: "cards",
         title: "Card top-up needs attention",
         body:
           err instanceof Error
-            ? `Your deposit cleared but card funding failed: ${err.message}. Fund from your wallet or contact support.`
+            ? `Your deposit cleared but card funding failed: ${err.message}. Your USD balance is available — fund the card from your wallet or contact support.`
             : "Your deposit cleared but card funding failed. Fund from your wallet or contact support.",
       });
       return { error: err instanceof Error ? err.message : "card_fund_failed" };

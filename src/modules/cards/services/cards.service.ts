@@ -560,7 +560,7 @@ export class CardsService {
     userId: string,
     cardId: string,
     input: z.infer<typeof fundCardSchema>,
-    opts?: { skipPinCheck?: boolean },
+    opts?: { skipPinCheck?: boolean; idempotencyKey?: string },
   ) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.CARDS_FUND, "Card funding is temporarily disabled");
     if (!opts?.skipPinCheck) {
@@ -574,24 +574,61 @@ export class CardsService {
 
     const fees = await resolveCardFees();
     if (input.amount < fees.minFundUsd) {
-      throw new AppError(`Minimum card fund is $${fees.minFundUsd}`, 400);
+      throw new AppError(`Minimum card fund is $${fees.minFundUsd}`, 400, "MIN_FUND");
     }
 
     const loadFee = cardFundFeeUsd(input.amount, fees);
     const debitTotal = cardFundDebitUsd(input.amount, fees);
 
+    // Always debit USD for fee math. Convert NGN/SAR → USD first so we never undercharge.
+    let sourceDebited: number | undefined;
+    if (input.currency !== "USD") {
+      const probe = await fxService.quote(userId, {
+        fromCurrency: input.currency,
+        toCurrency: "USD",
+        amount: 1,
+      });
+      if (!(probe.rateApplied > 0)) {
+        throw new AppError("FX rate unavailable", 503, "FX_UNAVAILABLE");
+      }
+      let sourceNeeded = Math.ceil((debitTotal / probe.rateApplied) * 1e8) / 1e8;
+      let q = await fxService.quote(userId, {
+        fromCurrency: input.currency,
+        toCurrency: "USD",
+        amount: sourceNeeded,
+      });
+      if (q.toAmount + 1e-8 < debitTotal) {
+        sourceNeeded = Math.ceil(sourceNeeded * (debitTotal / q.toAmount) * 1e8) / 1e8;
+      }
+      await fxService.executeSwap(userId, {
+        fromCurrency: input.currency,
+        toCurrency: "USD",
+        amount: sourceNeeded,
+        idempotencyKey: opts?.idempotencyKey ? `${opts.idempotencyKey}-fx` : undefined,
+      });
+      sourceDebited = sourceNeeded;
+    }
+
     // User pays card amount + Pagocards load fee ($0.15 + 0.75%); only `amount` is loaded on-card.
     const walletTx = await walletService.debit({
       userId,
-      currency: input.currency,
+      currency: "USD",
       amount: debitTotal,
       type: "CARD_FUND",
-      description: `Fund Visa card ${card.last4 ?? card.id} ($${input.amount} + $${loadFee} fee)`,
+      description: sanitizePublicCopy(
+        `Fund Visa card ${card.last4 ?? card.id} ($${input.amount} + $${loadFee} fee)`,
+      ),
       provider: usePagocardsLive() ? "pagocards" : "simulated",
       providerRef: card.providerCardId,
+      fee: loadFee,
       metadata: {
+        cardId: card.id,
         cardAmount: input.amount,
+        cardAmountUsd: input.amount,
         loadFeeUsd: loadFee,
+        debitTotalUsd: debitTotal,
+        sourceCurrency: input.currency,
+        sourceDebited: sourceDebited ?? null,
         feeFormula: "$0.15 + 0.75%",
       },
     });
@@ -642,10 +679,10 @@ export class CardsService {
     } catch (error) {
       await walletService.credit({
         userId,
-        currency: input.currency,
+        currency: "USD",
         amount: debitTotal,
         type: "ADJUSTMENT",
-        description: `Refund failed card fund ${card.id}`,
+        description: sanitizePublicCopy(`Refund failed card fund ${card.id}`),
         provider: "pagocards",
       });
       throw error;
@@ -1021,17 +1058,25 @@ export class CardsService {
     if (!user) throw new NotFoundError("User not found");
 
     if (usePagocardsLive()) {
-      if (!card.providerCardId) throw new AppError("Card is not ready for spend controls");
-      await pagocardsClient.setSpendControls({
-        cardid: card.providerCardId,
-        email: user.email,
-        ...(input.perTxLimit != null ? { single_transaction: String(input.perTxLimit) } : {}),
-        ...(input.dailyLimit != null ? { daily: String(input.dailyLimit) } : {}),
-        ...(input.monthlyLimit != null ? { monthly: String(input.monthlyLimit) } : {}),
-      });
+      if (!card.providerCardId) throw new AppError("Card is not ready for spend controls", 400, "CARD_NOT_READY");
+      try {
+        await pagocardsClient.setSpendControls({
+          cardid: card.providerCardId,
+          email: user.email,
+          ...(input.perTxLimit != null ? { single_transaction: String(input.perTxLimit) } : {}),
+          ...(input.dailyLimit != null ? { daily: String(input.dailyLimit) } : {}),
+          ...(input.monthlyLimit != null ? { monthly: String(input.monthlyLimit) } : {}),
+        });
+      } catch {
+        throw new AppError(
+          "Could not update card limits. Try again or contact support.",
+          502,
+          "CARD_LIMITS",
+        );
+      }
     }
 
-    return prisma.card.update({
+    const updated = await prisma.card.update({
       where: { id: card.id },
       data: {
         providerPayload: asJson({
@@ -1052,6 +1097,8 @@ export class CardsService {
         }),
       },
     });
+    const spentMap = await spentThisMonthByCardIds([updated.id]);
+    return toPublicCard(updated, spentMap.get(updated.id) ?? 0);
   }
 
   async terminate(userId: string, cardId: string) {
@@ -1063,20 +1110,48 @@ export class CardsService {
   }
 
   async statements(userId: string, cardId: string) {
-    await this.get(userId, cardId);
-    const fundings = await prisma.cardFunding.findMany({
-      where: { cardId },
-      include: { transaction: true },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    });
-    return fundings.map((f) => ({
+    const card = await this.get(userId, cardId);
+    const [fundings, authorizations] = await Promise.all([
+      prisma.cardFunding.findMany({
+        where: { cardId },
+        include: { transaction: true },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      }),
+      prisma.cardAuthorization.findMany({
+        where: card.last4
+          ? { OR: [{ cardId }, { last4: card.last4 }] }
+          : { cardId },
+        orderBy: { at: "desc" },
+        take: 50,
+      }),
+    ]);
+
+    const fundingRows = fundings.map((f) => ({
       id: f.id,
-      amount: f.amount,
-      direction: f.direction,
+      kind: f.direction === "WITHDRAW" ? "withdraw" : "fund",
+      amount: Number(f.amount),
+      currency: "USD",
+      merchant: f.direction === "WITHDRAW" ? "Card withdraw" : "Card top-up",
+      status: String(f.transaction?.status ?? "SUCCESS").toLowerCase(),
       createdAt: f.createdAt,
-      transaction: f.transaction,
+      transactionId: f.transactionId,
     }));
+
+    const authRows = authorizations.map((a) => ({
+      id: a.id,
+      kind: "spend",
+      amount: Number(a.amount),
+      currency: a.currency || "USD",
+      merchant: a.merchant || "Card spend",
+      status: String(a.decision).toLowerCase(),
+      createdAt: a.at,
+      transactionId: null as string | null,
+    }));
+
+    return [...fundingRows, ...authRows]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 80);
   }
 
   /**
