@@ -88,6 +88,54 @@ function extractQuoteFee(quote: Record<string, unknown>, sourceAmount: number, t
   return Math.max(0, +(sourceAmount - targetAmount).toFixed(2));
 }
 
+/** Prefer Busha's field validation reasons (e.g. minimum deposit) over generic provider copy. */
+export function mapBushaDepositError(err: unknown): AppError {
+  if (err instanceof AppError && err.code !== "PROVIDER_ERROR") return err;
+
+  const details =
+    err instanceof AppError && err.details && typeof err.details === "object"
+      ? (err.details as Record<string, unknown>)
+      : {};
+  const upstream = asRecord(details.upstream);
+  const body = asRecord(upstream.data ?? upstream);
+  const fields = asRecord(body.fields ?? asRecord(body.error).fields);
+
+  const reasons: string[] = [];
+  for (const key of Object.keys(fields)) {
+    const val = fields[key];
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (typeof item === "string" && item.trim()) reasons.push(item.trim());
+        else if (item && typeof item === "object") {
+          const r = str(asRecord(item).reason) ?? str(asRecord(item).message);
+          if (r) reasons.push(r);
+        }
+      }
+    } else if (typeof val === "string" && val.trim()) {
+      reasons.push(val.trim());
+    }
+  }
+
+  const joined = reasons.join(" ").trim();
+  const msg = joined || (err instanceof Error ? err.message : "");
+  if (/minimum|min\b|too (low|small)|below/i.test(msg)) {
+    return new AppError(
+      sanitizePublicCopy(msg, "Amount is below the minimum deposit. Enter a higher amount."),
+      400,
+      "MIN_DEPOSIT",
+    );
+  }
+  if (joined) {
+    return new AppError(sanitizePublicCopy(joined, joined), 400, "DEPOSIT_REJECTED");
+  }
+  if (err instanceof AppError) return err;
+  return new AppError(
+    sanitizePublicCopy(msg, "Could not start bank deposit. Please try again."),
+    502,
+    "PROVIDER_ERROR",
+  );
+}
+
 /** Prefer Busha's field validation reasons (e.g. minimum payout) over generic provider copy. */
 export function mapBushaPayoutError(err: unknown, targetAmount?: number): AppError {
   if (err instanceof AppError && err.code !== "PROVIDER_ERROR") return err;
@@ -224,43 +272,47 @@ export class BushaFloatService {
       };
     }
 
-    const quoteRaw = unwrapData(
-      await bushaClient.createQuote(
-        {
-          source_currency: "NGN",
-          target_currency: "NGN",
-          source_amount: String(sourceAmount),
-          pay_in: { type: "temporary_bank_account" },
-        },
-        null,
-      ),
-    );
-    const quoteId = str(quoteRaw.id);
-    if (!quoteId) throw new AppError("Deposit quote missing id", 502);
+    try {
+      const quoteRaw = unwrapData(
+        await bushaClient.createQuote(
+          {
+            source_currency: "NGN",
+            target_currency: "NGN",
+            source_amount: String(sourceAmount),
+            pay_in: { type: "temporary_bank_account" },
+          },
+          null,
+        ),
+      );
+      const quoteId = str(quoteRaw.id);
+      if (!quoteId) throw new AppError("Deposit quote missing id", 502);
 
-    const transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, null));
-    const transferId = str(transfer.id) ?? str(transfer.reference);
-    if (!transferId) throw new AppError("Deposit transfer missing id", 502);
+      const transfer = unwrapData(await bushaClient.createTransfer({ quote_id: quoteId }, null));
+      const transferId = str(transfer.id) ?? str(transfer.reference);
+      if (!transferId) throw new AppError("Deposit transfer missing id", 502);
 
-    const bank = extractBank(transfer);
-    if (!bank.accountNumber) {
-      throw new AppError("Temporary bank account details were not returned", 502);
+      const bank = extractBank(transfer);
+      if (!bank.accountNumber) {
+        throw new AppError("Temporary bank account details were not returned", 502);
+      }
+
+      const targetAmount =
+        num(transfer.target_amount) ?? num(quoteRaw.target_amount) ?? sourceAmount;
+      const feeAmount = feeFromTransfer(transfer) || Math.max(0, sourceAmount - targetAmount);
+
+      return {
+        transferId,
+        quoteId,
+        sourceAmount,
+        targetAmount,
+        feeAmount,
+        bank,
+        raw: { quote: quoteRaw, transfer },
+        simulated: false,
+      };
+    } catch (err) {
+      throw mapBushaDepositError(err);
     }
-
-    const targetAmount =
-      num(transfer.target_amount) ?? num(quoteRaw.target_amount) ?? sourceAmount;
-    const feeAmount = feeFromTransfer(transfer) || Math.max(0, sourceAmount - targetAmount);
-
-    return {
-      transferId,
-      quoteId,
-      sourceAmount,
-      targetAmount,
-      feeAmount,
-      bank,
-      raw: { quote: quoteRaw, transfer },
-      simulated: false,
-    };
   }
 
   /** Create ngn_bank recipient on the business profile. */

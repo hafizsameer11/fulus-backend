@@ -309,8 +309,26 @@ export class CryptoService {
         const stable = unwrapList(await bushaClient.listCurrencies({ type: "stablecoin" }));
         const merged = [...crypto, ...stable];
         if (merged.length) {
-          return merged.map((c) => {
+          const byCode = new Map<
+            string,
+            {
+              code: string;
+              name: string;
+              displayName: string;
+              type: string;
+              decimals: string;
+              icon: string | null;
+              deposit: boolean;
+              withdrawal: boolean;
+              defaultNetwork: string | null;
+              supportedNetworks: string[];
+              networks: Array<{ code: string; name: string }>;
+              provider: string;
+            }
+          >();
+          for (const c of merged) {
             const code = String(c.code ?? "").toUpperCase();
+            if (!code) continue;
             const networks = normalizeNetworks(c.supported_networks ?? c.networks);
             const defaultNetwork =
               (typeof c.default_network === "string" ? c.default_network.toUpperCase() : null) ??
@@ -321,7 +339,7 @@ export class CryptoService {
               (typeof c.logo === "string" && c.logo) ||
               (typeof c.image === "string" && c.image) ||
               null;
-            return {
+            const row = {
               code,
               name: String(c.name ?? c.display_name ?? code),
               displayName: String(c.display_name ?? c.name ?? code),
@@ -335,7 +353,25 @@ export class CryptoService {
               networks,
               provider: "busha",
             };
-          }).filter((c) => c.code);
+            const prev = byCode.get(code);
+            if (!prev) {
+              byCode.set(code, row);
+              continue;
+            }
+            // Merge duplicates (crypto + stablecoin lists): keep richer network/icon metadata.
+            const netMap = new Map(prev.networks.map((n) => [n.code, n]));
+            for (const n of row.networks) netMap.set(n.code, n);
+            const networksMerged = [...netMap.values()];
+            byCode.set(code, {
+              ...prev,
+              ...row,
+              icon: row.icon || prev.icon,
+              networks: networksMerged,
+              supportedNetworks: networksMerged.map((n) => n.code),
+              defaultNetwork: row.defaultNetwork || prev.defaultNetwork || networksMerged[0]?.code || null,
+            });
+          }
+          return [...byCode.values()];
         }
       } catch (err) {
         console.error("[crypto] listCurrencies failed", err);
