@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
@@ -10,6 +11,21 @@ export const updateProfileSchema = z.object({
   phone: z.string().min(8).optional().nullable(),
   /** Base64 or data-URL image for profile photo */
   avatar: z.string().min(40).optional(),
+  /** Notification preferences stored on user.flagsJson */
+  notifPrefs: z
+    .object({
+      txPush: z.boolean().optional(),
+      txEmail: z.boolean().optional(),
+      txSms: z.boolean().optional(),
+      login: z.boolean().optional(),
+      security: z.boolean().optional(),
+      rates: z.boolean().optional(),
+      promo: z.boolean().optional(),
+      product: z.boolean().optional(),
+    })
+    .optional(),
+  /** Expo push token for this device */
+  pushToken: z.string().min(10).max(512).optional(),
 });
 
 export const changePasswordSchema = z.object({
@@ -62,18 +78,72 @@ export class UsersService {
   }
 
   async updateMe(userId: string, input: z.infer<typeof updateProfileSchema>) {
+    const existing = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { kycTier: true, kycStatus: true, flagsJson: true, firstName: true, lastName: true },
+    });
+    if (!existing) throw new NotFoundError("User not found");
+
+    const nameLocked =
+      existing.kycTier >= 1 || String(existing.kycStatus).toUpperCase() === "APPROVED";
+    if (nameLocked && (input.firstName !== undefined || input.lastName !== undefined)) {
+      const sameFirst =
+        input.firstName === undefined || input.firstName === (existing.firstName ?? undefined);
+      const sameLast =
+        input.lastName === undefined || input.lastName === (existing.lastName ?? undefined);
+      if (!sameFirst || !sameLast) {
+        throw new AppError(
+          "Name can’t be changed after identity verification. Contact support if you need a correction.",
+          400,
+          "NAME_LOCKED",
+        );
+      }
+    }
+
     let avatarPath: string | undefined;
     if (input.avatar) {
       avatarPath = await saveUserAvatar(userId, input.avatar);
     }
 
+    const prevFlags =
+      existing.flagsJson && typeof existing.flagsJson === "object" && !Array.isArray(existing.flagsJson)
+        ? (existing.flagsJson as Record<string, unknown>)
+        : {};
+    let nextFlags: Record<string, unknown> | undefined;
+    if (input.notifPrefs || input.pushToken) {
+      const tokens = Array.isArray(prevFlags.pushTokens)
+        ? [...(prevFlags.pushTokens as string[])]
+        : [];
+      if (input.pushToken && !tokens.includes(input.pushToken)) {
+        tokens.push(input.pushToken);
+        if (tokens.length > 10) tokens.splice(0, tokens.length - 10);
+      }
+      nextFlags = {
+        ...prevFlags,
+        ...(input.notifPrefs
+          ? {
+              notifPrefs: {
+                ...(typeof prevFlags.notifPrefs === "object" && prevFlags.notifPrefs
+                  ? (prevFlags.notifPrefs as Record<string, unknown>)
+                  : {}),
+                ...input.notifPrefs,
+              },
+            }
+          : {}),
+        ...(input.pushToken ? { pushTokens: tokens } : {}),
+      };
+    }
+
     const user = await prisma.user.update({
       where: { id: userId },
       data: {
-        ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
-        ...(input.lastName !== undefined ? { lastName: input.lastName } : {}),
+        ...(input.firstName !== undefined && !nameLocked ? { firstName: input.firstName } : {}),
+        ...(input.lastName !== undefined && !nameLocked ? { lastName: input.lastName } : {}),
         ...(input.phone !== undefined ? { phone: input.phone } : {}),
         ...(avatarPath !== undefined ? { avatarPath } : {}),
+        ...(nextFlags !== undefined
+          ? { flagsJson: nextFlags as Prisma.InputJsonValue }
+          : {}),
       },
       select: profileSelect,
     });

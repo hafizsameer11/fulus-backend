@@ -291,13 +291,24 @@ function extractTempBank(transfer: Record<string, unknown>) {
   };
 }
 
-function withBankAccount<T extends { providerPayload?: unknown }>(order: T) {
+function withBankAccount<T extends { providerPayload?: unknown; status?: string }>(order: T) {
   const payload = asRecord(order.providerPayload);
+  const walletDebited = Boolean(payload.walletDebited);
+  const masterFloatBuy = Boolean(payload.masterFloatBuy ?? payload.fundedByMaster);
+  const status = String(order.status ?? "").toUpperCase();
+  // Wallet already paid — UI must not send the user to an external bank transfer screen.
+  const skipBankPay =
+    walletDebited &&
+    (masterFloatBuy || status === "SUCCESS" || status === "PROCESSING" || Boolean(payload.creditSettled));
   return {
     ...order,
-    bankAccount: payload.bankAccount ?? null,
+    bankAccount: skipBankPay ? null : (payload.bankAccount ?? null),
     receiptTransactionId: payload.receiptTransactionId ?? null,
     userMarkedPaidAt: payload.userMarkedPaidAt ?? null,
+    walletDebited,
+    masterFloatBuy,
+    skipBankPay,
+    paymentMethod: skipBankPay ? ("wallet" as const) : ("bank" as const),
   };
 }
 
@@ -901,7 +912,7 @@ export class CryptoService {
     const live = useBushaLive();
     const customer = live ? await requireBushaCustomer(userId) : null;
 
-    // BUY: debit Fulus NGN ledger; fund Busha buy rail from master float.
+    // BUY: debit user's quoteCurrency wallet; fund Busha buy rail from master float.
     if (input.side === "BUY") {
       return this.createBankBuyOrder(userId, input, customer?.bushaCustomerId ?? null, live);
     }
@@ -1080,27 +1091,39 @@ export class CryptoService {
       marginCurrency: "NGN",
     };
 
-    // Debit full all-in NGN (virtual ledger). Master float funds Busha at bushaSpend only.
+    // Debit the user's selected wallet (NGN / USD / SAR). Master float funds Busha at bushaSpend.
+    const debitCurrency = (userFiat === "USD" || userFiat === "SAR" || userFiat === "NGN"
+      ? userFiat
+      : "NGN") as WalletCurrency;
+    const debitAmount = debitCurrency === "NGN" ? ngnAmount : amount;
+    const debitLabel =
+      debitCurrency === "NGN"
+        ? `₦${ngnAmount.toLocaleString()}`
+        : debitCurrency === "USD"
+          ? `$${amount.toLocaleString()}`
+          : `SAR ${amount.toLocaleString()}`;
     const debitTx = await walletService.debit({
       userId,
-      currency: "NGN",
-      amount: ngnAmount,
+      currency: debitCurrency,
+      amount: debitAmount,
       type: "CRYPTO_BUY",
-      description: `Buy ${base} · ₦${ngnAmount.toLocaleString()}`,
+      description: `Buy ${base} · ${debitLabel}`,
       provider: live ? "busha" : "simulated",
-      fee: margin,
+      fee: debitCurrency === "NGN" ? margin : 0,
       metadata: asJson({
-        kind: "crypto_bank_buy_debit",
+        kind: "crypto_wallet_buy_debit",
         side: "BUY",
         creditCurrency,
         userFiat,
         userFiatAmount: amount,
+        ngnEquivalent: ngnAmount,
         fxBridge,
         fulusSpread,
         fee: margin,
         feeIncludedInRate: true,
         walletDebited: true,
         masterFloatBuy: true,
+        paymentMethod: "wallet",
       }),
     });
 
@@ -1193,8 +1216,8 @@ export class CryptoService {
     } catch (error) {
       await walletService.credit({
         userId,
-        currency: "NGN",
-        amount: ngnAmount,
+        currency: debitCurrency,
+        amount: debitAmount,
         type: "ADJUSTMENT",
         description: `Refund failed crypto buy setup ${debitTx.reference}`,
         provider: live ? "busha" : "simulated",
@@ -1203,6 +1226,7 @@ export class CryptoService {
       throw error;
     }
 
+    // Bank details are ops-only (master float pays). Never require the user to transfer again.
     const bankAccount = {
       ...extractTempBank(transfer),
       amount: ngnAmount,
@@ -1211,15 +1235,16 @@ export class CryptoService {
       userFiat,
       userFiatAmount: amount,
       fundedByMaster: true,
+      internalOnly: true,
     };
 
     await prisma.transaction.update({
       where: { id: debitTx.id },
       data: {
-        status: "PENDING",
+        status: live ? "PROCESSING" : "SUCCESS",
         providerRef,
         metadata: asJson({
-          kind: "crypto_bank_buy_pending",
+          kind: "crypto_wallet_buy_pending",
           side: "BUY",
           creditCurrency,
           creditAmount: receiveAmount,
@@ -1230,6 +1255,7 @@ export class CryptoService {
           feeIncludedInRate: true,
           walletDebited: true,
           masterFloatBuy: true,
+          paymentMethod: "wallet",
           masterPayout,
           masterRecipientId,
           payInType: "temporary_bank_account",
@@ -1250,7 +1276,7 @@ export class CryptoService {
         network: input.network,
         provider: live ? "busha" : "simulated",
         providerRef,
-        status: "PENDING",
+        status: live ? "PROCESSING" : "PENDING",
         providerPayload: asJson({
           quote: quoteRaw,
           transfer,
@@ -1263,6 +1289,7 @@ export class CryptoService {
           feeIncludedInRate: true,
           walletDebited: true,
           masterFloatBuy: true,
+          paymentMethod: "wallet",
           masterPayout,
           masterRecipientId,
           payInType: "temporary_bank_account",

@@ -2,6 +2,21 @@ import { Prisma, type TransactionType, type WalletCurrency } from "@prisma/clien
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import { maybeSendTxReceiptEmail } from "../../../lib/tx-receipt-email.js";
+
+const RECEIPT_TYPES = new Set<string>([
+  "DEPOSIT",
+  "WITHDRAWAL",
+  "TRANSFER",
+  "SWAP",
+  "CARD_FUND",
+  "CARD_WITHDRAW",
+  "CRYPTO_BUY",
+  "CRYPTO_SELL",
+  "CRYPTO_SEND",
+  "BILL_PAYMENT",
+  "ESIM_PURCHASE",
+]);
 
 function scrubDescription(description?: string | null) {
   return sanitizePublicCopy(description) || undefined;
@@ -99,6 +114,18 @@ export class WalletService {
       });
 
       return transaction;
+    }).then((transaction) => {
+      if (RECEIPT_TYPES.has(String(params.type))) {
+        void maybeSendTxReceiptEmail({
+          userId: params.userId,
+          type: String(params.type),
+          amount: amount.toString(),
+          currency: params.currency,
+          description: description ?? null,
+          reference: transaction.reference,
+        });
+      }
+      return transaction;
     });
   }
 
@@ -162,6 +189,18 @@ export class WalletService {
         },
       });
 
+      return transaction;
+    }).then((transaction) => {
+      if (RECEIPT_TYPES.has(String(params.type))) {
+        void maybeSendTxReceiptEmail({
+          userId: params.userId,
+          type: String(params.type),
+          amount: amount.toString(),
+          currency: params.currency,
+          description: description ?? null,
+          reference: transaction.reference,
+        });
+      }
       return transaction;
     });
   }
