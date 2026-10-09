@@ -90,7 +90,23 @@ function hasSensitiveDetails(card: { expMonth: number | null; expYear: number | 
   return Boolean(pan && cvv && hasExpiry);
 }
 
-function toPublicCard(card: NonNullable<CardRow>) {
+function limitsFromPayload(p: Record<string, unknown>) {
+  const nested =
+    p.limits && typeof p.limits === "object" && !Array.isArray(p.limits)
+      ? (p.limits as Record<string, unknown>)
+      : {};
+  const num = (v: unknown) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return {
+    dailyLimit: num(p.dailyLimit ?? nested.dailyLimit),
+    monthlyLimit: num(p.monthlyLimit ?? nested.monthlyLimit),
+    perTxLimit: num(p.perTxLimit ?? nested.perTxLimit),
+  };
+}
+
+function toPublicCard(card: NonNullable<CardRow>, spentThisMonth = 0) {
   const p = payloadOf(card);
   const pan = pickPagoString(p, ["pan", "card_number", "cardnumber"]) ?? null;
   const cvv = pickPagoString(p, ["cvv", "cvc"]) ?? null;
@@ -99,6 +115,7 @@ function toPublicCard(card: NonNullable<CardRow>) {
     (card.expMonth && card.expYear
       ? `${String(card.expMonth).padStart(2, "0")}/${String(card.expYear).slice(-2)}`
       : null);
+  const limits = limitsFromPayload(p);
 
   return {
     ...card,
@@ -108,7 +125,34 @@ function toPublicCard(card: NonNullable<CardRow>) {
     expiredate,
     cardNumber: pan,
     detailsReady: Boolean(pan && cvv && (expiredate || (card.expMonth && card.expYear))),
+    spent: spentThisMonth,
+    spentThisMonth,
+    dailyLimit: limits.dailyLimit || null,
+    monthlyLimit: limits.monthlyLimit || null,
+    perTxLimit: limits.perTxLimit || null,
   };
+}
+
+async function spentThisMonthByCardIds(cardIds: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  if (!cardIds.length) return map;
+  const start = new Date();
+  start.setUTCDate(1);
+  start.setUTCHours(0, 0, 0, 0);
+  const rows = await prisma.cardAuthorization.groupBy({
+    by: ["cardId"],
+    where: {
+      cardId: { in: cardIds },
+      decision: { in: ["approved", "APPROVED"] },
+      at: { gte: start },
+    },
+    _sum: { amount: true },
+  });
+  for (const row of rows) {
+    if (!row.cardId) continue;
+    map.set(row.cardId, Number(row._sum.amount ?? 0));
+  }
+  return map;
 }
 
 export class CardsService {
@@ -194,7 +238,8 @@ export class CardsService {
   async list(userId: string) {
     const cards = await prisma.card.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
     const synced = await Promise.all(cards.map((c) => this.syncProviderDetails(c, { onlyIfMissing: true, retries: 2 })));
-    return synced.map(toPublicCard);
+    const spentMap = await spentThisMonthByCardIds(synced.map((c) => c.id));
+    return synced.map((c) => toPublicCard(c, spentMap.get(c.id) ?? 0));
   }
 
   async get(userId: string, cardId: string) {
@@ -204,7 +249,8 @@ export class CardsService {
       onlyIfMissing: false,
       retries: hasSensitiveDetails(card) ? 1 : 4,
     });
-    return toPublicCard(synced);
+    const spentMap = await spentThisMonthByCardIds([synced.id]);
+    return toPublicCard(synced, spentMap.get(synced.id) ?? 0);
   }
 
   /** Force-refresh PAN/CVV/expiry from Pagocards (used when user reveals details). */

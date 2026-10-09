@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import { createInboxMessage } from "../../../lib/inbox.js";
 import { useBushaLive } from "../../../lib/simulate.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
@@ -212,11 +213,21 @@ export class TransfersService {
       ? await prisma.user.findUnique({ where: { id: input.toUserId } })
       : await prisma.user.findUnique({ where: { email: input.toEmail!.toLowerCase() } });
     if (!recipient) throw new NotFoundError("Recipient not found");
-    if (recipient.id === userId) throw new AppError("Cannot transfer to yourself");
+    if (recipient.id === userId) {
+      throw new AppError("Cannot transfer to yourself", 400, "CANNOT_TRANSFER_SELF");
+    }
 
     const amount = new Prisma.Decimal(input.amount);
+    const sender = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true, email: true },
+    });
+    const senderLabel =
+      [sender?.firstName, sender?.lastName].filter(Boolean).join(" ").trim() ||
+      sender?.email ||
+      "A Fulus user";
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const fromWallet = await tx.wallet.findUnique({
         where: { userId_currency: { userId, currency: input.currency } },
       });
@@ -281,6 +292,16 @@ export class TransfersService {
 
       return { transaction: outTx, recipient: { id: recipient.id, email: recipient.email } };
     });
+
+    const symbol = input.currency === "NGN" ? "₦" : input.currency === "SAR" ? "﷼" : "$";
+    await createInboxMessage({
+      userId: recipient.id,
+      category: "wallet",
+      title: "Money received",
+      body: `${senderLabel} sent you ${symbol}${Number(input.amount).toLocaleString()} ${input.currency}.`,
+    });
+
+    return result;
   }
 
   /**
@@ -521,7 +542,7 @@ export class TransfersService {
     }
   }
 
-  async lookupUser(q: string) {
+  async lookupUser(q: string, excludeUserId?: string) {
     const query = q.trim().toLowerCase();
     if (!query) return [];
     return prisma.user.findMany({
@@ -533,6 +554,7 @@ export class TransfersService {
           { lastName: { contains: query } },
         ],
         status: "ACTIVE",
+        ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
       },
       take: 10,
       select: { id: true, email: true, firstName: true, lastName: true, phone: true },

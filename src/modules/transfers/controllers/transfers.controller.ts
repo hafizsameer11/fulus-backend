@@ -15,7 +15,7 @@ export class TransfersController {
 
   lookup = async (req: Request, res: Response) => {
     if (!req.user) throw new UnauthorizedError();
-    return ok(res, await transfersService.lookupUser(String(req.query.q ?? "")));
+    return ok(res, await transfersService.lookupUser(String(req.query.q ?? ""), req.user.id));
   };
 
   listBeneficiaries = async (req: Request, res: Response) => {
