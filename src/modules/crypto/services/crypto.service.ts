@@ -115,13 +115,54 @@ function strOf(obj: Record<string, unknown>, keys: string[]) {
 export function bushaNetworkCode(network: string, currency: string) {
   const n = network.trim().toUpperCase();
   const c = currency.trim().toUpperCase();
-  if (n === "TRC20" || n === "TRON") return "TRX";
+  if (n === "TRC20" || n === "TRON" || n === "TRX") return "TRX";
   if (n === "ERC20" || n === "ETHEREUM") return c === "ETH" ? "ETH" : "ERC20";
-  if (n === "BEP20" || n === "BSC") return "BEP20";
+  if (n === "BEP20" || n === "BSC" || n === "BNB") return "BSC";
   if (n === "BITCOIN" || n === "BTC") return "BTC";
   if (n === "SOLANA" || n === "SOL") return "SOL";
   if (n === "POLYGON" || n === "MATIC") return "POLYGON";
+  if (n === "BASE") return "BASE";
   return n || c;
+}
+
+/** Busha may label the same rail with several codes (e.g. BSC / BEP20). */
+function networkAliases(code: string): Set<string> {
+  const c = code.trim().toUpperCase();
+  const set = new Set<string>([c]);
+  if (c === "TRX" || c === "TRC20" || c === "TRON") {
+    for (const x of ["TRX", "TRC20", "TRON"]) set.add(x);
+  }
+  if (c === "BSC" || c === "BEP20" || c === "BNB") {
+    for (const x of ["BSC", "BEP20", "BNB"]) set.add(x);
+  }
+  if (c === "ETH" || c === "ERC20" || c === "ETHEREUM") {
+    for (const x of ["ETH", "ERC20", "ETHEREUM"]) set.add(x);
+  }
+  if (c === "BTC" || c === "BITCOIN") {
+    for (const x of ["BTC", "BITCOIN"]) set.add(x);
+  }
+  return set;
+}
+
+function pickDepositAddress(
+  rows: Record<string, unknown>[],
+  bushaNet: string,
+): { address: string; network: string; minimumDeposit?: string } | null {
+  const wanted = networkAliases(bushaNet);
+  const match =
+    rows.find((row) => wanted.has(String(row.network ?? "").toUpperCase())) ??
+    rows.find((row) => {
+      const display = String(row.network_display_name ?? "").toUpperCase();
+      return [...wanted].some((w) => display.includes(w));
+    });
+  if (!match) return null;
+  const address = strOf(match, ["address", "deposit_address"]);
+  if (!address) return null;
+  return {
+    address,
+    network: String(match.network ?? bushaNet),
+    minimumDeposit: strOf(match, ["minimum_deposit"]),
+  };
 }
 
 async function requireBushaCustomer(userId: string) {
@@ -1361,33 +1402,50 @@ export class CryptoService {
     let address: string | undefined;
 
     try {
-      const raw = await bushaClient.getDepositAddress(currency, customer.bushaCustomerId!, bushaNet);
-      const data = unwrapData(raw);
-      address =
-        strOf(data, ["address", "deposit_address"]) ??
-        strOf(asRecord(data.pay_in), ["address"]);
+      // Busha returns `{ data: [ { address, network, ... }, ... ] }` — not a single object.
+      const rows = unwrapList(await bushaClient.getDepositAddress(currency, customer.bushaCustomerId!, bushaNet));
+      const picked = pickDepositAddress(rows, bushaNet);
+      address = picked?.address;
+      if (!address && rows.length === 1) {
+        address = strOf(rows[0]!, ["address", "deposit_address"]);
+      }
     } catch {
       // Fallback: quote + transfer generates a one-shot deposit address.
       const minAmount = currency === "BTC" ? "0.0001" : currency === "ETH" ? "0.001" : "1";
-      const quoteRaw = await bushaClient.createQuote(
-        {
-          source_currency: currency,
-          target_currency: currency,
-          source_amount: minAmount,
-          pay_in: { type: "address", network: bushaNet },
-        },
-        customer.bushaCustomerId!,
-      );
-      const quote = unwrapData(quoteRaw);
-      const quoteId = strOf(quote, ["id"]);
-      if (!quoteId) throw new AppError("Could not create deposit quote", 502);
-      const transferRaw = await bushaClient.createTransfer({ quote_id: quoteId }, customer.bushaCustomerId!);
-      const transfer = unwrapData(transferRaw);
-      const payIn = asRecord(transfer.pay_in);
-      address = strOf(payIn, ["address"]) ?? strOf(transfer, ["address"]);
+      try {
+        const quoteRaw = await bushaClient.createQuote(
+          {
+            source_currency: currency,
+            target_currency: currency,
+            source_amount: minAmount,
+            pay_in: { type: "address", network: bushaNet },
+          },
+          customer.bushaCustomerId!,
+        );
+        const quote = unwrapData(quoteRaw);
+        const quoteId = strOf(quote, ["id"]);
+        if (!quoteId) throw new AppError("Could not create deposit quote", 502);
+        const transferRaw = await bushaClient.createTransfer({ quote_id: quoteId }, customer.bushaCustomerId!);
+        const transfer = unwrapData(transferRaw);
+        const payIn = asRecord(transfer.pay_in);
+        address = strOf(payIn, ["address"]) ?? strOf(transfer, ["address"]);
+      } catch (fallbackErr) {
+        if (fallbackErr instanceof AppError) throw fallbackErr;
+        throw new AppError(
+          `Could not get a ${currency} deposit address on ${network}. Try another network.`,
+          502,
+          "DEPOSIT_ADDRESS_UNAVAILABLE",
+        );
+      }
     }
 
-    if (!address) throw new AppError("Deposit address was not returned", 502);
+    if (!address) {
+      throw new AppError(
+        `No ${currency} deposit address for network ${network}. Try another network.`,
+        502,
+        "DEPOSIT_ADDRESS_UNAVAILABLE",
+      );
+    }
 
     if (existing) {
       return prisma.cryptoAddress.update({

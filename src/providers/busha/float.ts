@@ -63,6 +63,8 @@ export type MasterPayoutResult = MasterPayoutQuote & {
 /** Approximate Busha NGN bank payout fee when simulating (₦100 + 7.5% VAT). */
 export const SIM_BANK_PAYOUT_FEE_NGN = 107.5;
 export const MIN_BUSHA_BANK_RECEIVE_NGN = 499;
+/** Busha temp-bank NGN deposit minimum (source_amount). */
+export const MIN_BUSHA_NGN_DEPOSIT = 200;
 
 /** Never surface vendor brand names in bank details shown to users. */
 function scrubVendorBrand(value: string | undefined): string | undefined {
@@ -120,7 +122,7 @@ export function mapBushaDepositError(err: unknown): AppError {
   const msg = joined || (err instanceof Error ? err.message : "");
   if (/minimum|min\b|too (low|small)|below/i.test(msg)) {
     return new AppError(
-      sanitizePublicCopy(msg, "Amount is below the minimum deposit. Enter a higher amount."),
+      sanitizePublicCopy(msg, `Minimum bank deposit is ₦${MIN_BUSHA_NGN_DEPOSIT}.`),
       400,
       "MIN_DEPOSIT",
     );
@@ -251,6 +253,13 @@ export class BushaFloatService {
   /** NGN→NGN temp bank deposit that credits the business (master) float. */
   async createMasterNgnDeposit(sourceAmount: number): Promise<MasterDepositResult> {
     if (!(sourceAmount > 0)) throw new AppError("Invalid deposit amount");
+    if (sourceAmount + 1e-9 < MIN_BUSHA_NGN_DEPOSIT) {
+      throw new AppError(
+        `Minimum bank deposit is ₦${MIN_BUSHA_NGN_DEPOSIT}.`,
+        400,
+        "MIN_DEPOSIT",
+      );
+    }
 
     if (!useBushaLive()) {
       const transferId = simRef("TRF");

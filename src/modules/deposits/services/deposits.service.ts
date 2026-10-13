@@ -8,7 +8,7 @@ import { createInboxMessage } from "../../../lib/inbox.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { fxService } from "../../fx/services/fx.service.js";
 import { flutterwaveClient, flutterwaveLive } from "../../../providers/flutterwave/client.js";
-import { bushaFloatService } from "../../../providers/busha/float.js";
+import { bushaFloatService, MIN_BUSHA_NGN_DEPOSIT } from "../../../providers/busha/float.js";
 import { simulateProviders, useBushaLive } from "../../../lib/simulate.js";
 import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 import { cardFundDebitUsd, resolveCardFees } from "../../../providers/pagocards/fees.js";
@@ -23,7 +23,11 @@ export const createDepositSchema = z.object({
 
 export const bushaNgnDepositSchema = z
   .object({
-    amount: z.number().positive().min(100).max(5_000_000),
+    amount: z
+      .number()
+      .positive()
+      .min(MIN_BUSHA_NGN_DEPOSIT, `Minimum bank deposit is ₦${MIN_BUSHA_NGN_DEPOSIT}.`)
+      .max(5_000_000),
     /** When `card_fund`, deposit settlement auto-loads the card after NGN credit. */
     purpose: z.enum(["wallet", "card_fund"]).optional(),
     cardId: z.string().min(1).optional(),
