@@ -160,7 +160,11 @@ export class TransfersService {
           data.account_name ?? data.accountName ?? data.name ?? "",
         ).trim();
         if (!accountName) {
-          throw new AppError("Could not resolve account name", 400, "RESOLVE_FAILED");
+          throw new AppError(
+            "Invalid account number. Check the bank and account details.",
+            400,
+            "RESOLVE_FAILED",
+          );
         }
         return {
           provider: "busha",
@@ -173,12 +177,10 @@ export class TransfersService {
           },
         };
       } catch (err) {
-        if (err instanceof AppError) throw err;
+        // ProviderError is an AppError with payment-generic copy — never surface that for name enquiry.
+        if (err instanceof AppError && err.code === "RESOLVE_FAILED") throw err;
         throw new AppError(
-          sanitizePublicCopy(
-            err instanceof Error ? err.message : "Could not resolve bank account",
-            "Could not resolve bank account",
-          ),
+          "Invalid account number. Check the bank and account details.",
           400,
           "RESOLVE_FAILED",
         );
