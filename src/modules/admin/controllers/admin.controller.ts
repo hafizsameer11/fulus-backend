@@ -171,7 +171,8 @@ export class AdminKycController {
 export class AdminSupportController {
   list = async (req: Request, res: Response) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
-    return ok(res, { tickets: await supportService.adminListTickets(status) });
+    const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
+    return ok(res, { tickets: await supportService.adminListTickets(status, userId) });
   };
 
   get = async (req: Request, res: Response) => {

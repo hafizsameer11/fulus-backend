@@ -3,6 +3,11 @@ import type { Prisma, WalletCurrency } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import {
+  CRYPTO_WALLET_CURRENCIES,
+  isCryptoWalletCurrency,
+  isWalletCurrency,
+} from "../../../lib/wallet-currency.js";
 import { bushaClient } from "../../../providers/busha/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { securityService } from "../../security/services/security.service.js";
@@ -421,9 +426,17 @@ export class CryptoService {
               networks: networksMerged,
               supportedNetworks: networksMerged.map((n) => n.code),
               defaultNetwork: row.defaultNetwork || prev.defaultNetwork || networksMerged[0]?.code || null,
+              deposit: prev.deposit || row.deposit,
+              withdrawal: prev.withdrawal || row.withdrawal,
             });
           }
-          return [...byCode.values()];
+          // Hide assets Busha can't receive (deposit=false / no networks) and
+          // coins we cannot ledger yet. Prefer POL over legacy MATIC.
+          return [...byCode.values()]
+            .filter((c) => c.code !== "MATIC")
+            .filter((c) => isCryptoWalletCurrency(c.code))
+            .filter((c) => c.deposit && c.supportedNetworks.length > 0)
+            .sort((a, b) => a.code.localeCompare(b.code));
         }
       } catch (err) {
         console.error("[crypto] listCurrencies failed", err);
@@ -447,7 +460,7 @@ export class CryptoService {
           : [{ code: c.code, name: c.code }],
       provider: "simulated",
       simulated: true,
-    }));
+    })).filter((c) => isCryptoWalletCurrency(c.code));
   }
 
   async balances(userId: string) {
@@ -467,11 +480,11 @@ export class CryptoService {
       })).filter((b) => b.currency && b.type !== "fiat");
     }
 
-    for (const c of ["USDT", "BTC", "ETH"] as WalletCurrency[]) {
+    for (const c of CRYPTO_WALLET_CURRENCIES) {
       await ensureCryptoWallet(userId, c);
     }
     const wallets = await prisma.wallet.findMany({
-      where: { userId, currency: { in: ["USDT", "BTC", "ETH"] } },
+      where: { userId, currency: { in: CRYPTO_WALLET_CURRENCIES } },
     });
     return wallets.map((w) => ({
       currency: w.currency,
@@ -482,8 +495,7 @@ export class CryptoService {
   }
 
   /**
-   * Admin custody rollup: Busha customer crypto balances (AAVE/SOL/…) plus
-   * local Wallet rows for USDT/BTC/ETH (ledger assets that may not sit on Busha).
+   * Admin custody rollup: Busha customer crypto balances plus local crypto Wallet rows.
    */
   async aggregateCustomerHoldings(): Promise<
     Map<string, { customerHoldings: number; holders: number; pending: number }>
@@ -898,13 +910,16 @@ export class CryptoService {
     if (order.provider === "simulated" || !useBushaLive()) {
       const creditCurrency = String(payload.creditCurrency ?? order.baseCurrency).toUpperCase();
       const creditAmount = Number(payload.creditAmount ?? order.quoteAmount ?? 0);
-      if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
-        await ensureCryptoWallet(userId, creditCurrency as WalletCurrency);
+      if (isCryptoWalletCurrency(creditCurrency)) {
+        await ensureCryptoWallet(userId, creditCurrency);
       }
       if (creditCurrency && creditAmount > 0 && !payload.creditSettled) {
+        if (!isWalletCurrency(creditCurrency)) {
+          throw new AppError(`Unsupported wallet currency ${creditCurrency}`, 400, "UNSUPPORTED_CURRENCY");
+        }
         const receipt = await walletService.credit({
           userId,
-          currency: creditCurrency as WalletCurrency,
+          currency: creditCurrency,
           amount: creditAmount,
           type: "CRYPTO_BUY",
           description: `Buy ${creditCurrency} (bank transfer confirmed)`,
@@ -940,13 +955,21 @@ export class CryptoService {
     await requireNinKyc(userId);
 
     const amount = Number(input.amount);
-    const debitCurrency = (input.side === "BUY" ? input.quoteCurrency : input.baseCurrency).toUpperCase() as WalletCurrency;
-    const creditCurrency = (input.side === "BUY" ? input.baseCurrency : input.quoteCurrency).toUpperCase() as WalletCurrency;
+    const debitCurrencyRaw = (input.side === "BUY" ? input.quoteCurrency : input.baseCurrency).toUpperCase();
+    const creditCurrencyRaw = (input.side === "BUY" ? input.baseCurrency : input.quoteCurrency).toUpperCase();
+    if (!isWalletCurrency(debitCurrencyRaw)) {
+      throw new AppError(`Unsupported currency ${debitCurrencyRaw}`, 400, "UNSUPPORTED_CURRENCY");
+    }
+    if (!isWalletCurrency(creditCurrencyRaw)) {
+      throw new AppError(`Unsupported currency ${creditCurrencyRaw}`, 400, "UNSUPPORTED_CURRENCY");
+    }
+    const debitCurrency = debitCurrencyRaw;
+    const creditCurrency = creditCurrencyRaw;
 
-    if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
+    if (isCryptoWalletCurrency(creditCurrency)) {
       await ensureCryptoWallet(userId, creditCurrency);
     }
-    if (["USDT", "BTC", "ETH"].includes(debitCurrency)) {
+    if (isCryptoWalletCurrency(debitCurrency)) {
       await ensureCryptoWallet(userId, debitCurrency);
     }
 
@@ -1016,7 +1039,7 @@ export class CryptoService {
       } else {
         providerResult = { simulated: true, id: simRef("BU") };
         providerRef = String(providerResult.id);
-        if (["NGN", "USD", "SAR", "USDT", "BTC", "ETH"].includes(creditCurrency)) {
+        if (isWalletCurrency(creditCurrency)) {
           await walletService.credit({
             userId,
             currency: creditCurrency,
@@ -1087,13 +1110,18 @@ export class CryptoService {
     const amount = Number(input.amount);
     const userFiat = input.quoteCurrency.toUpperCase();
     const base = input.baseCurrency.toUpperCase();
-    const creditCurrency = base as WalletCurrency;
+    if (!isCryptoWalletCurrency(base)) {
+      throw new AppError(
+        `${base} is not supported in Fulus wallets yet. Try USDT, BTC, ETH, TRX, SOL, or another listed asset.`,
+        400,
+        "UNSUPPORTED_CURRENCY",
+      );
+    }
+    const creditCurrency = base;
 
     await cryptoAssetConfigService.assertTradeAllowed(base, "BUY");
 
-    if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
-      await ensureCryptoWallet(userId, creditCurrency);
-    }
+    await ensureCryptoWallet(userId, creditCurrency);
 
     let ngnAmount = amount;
     let fxBridge: Record<string, unknown> | null = null;
@@ -1478,10 +1506,11 @@ export class CryptoService {
     await securityService.assertTransactionPin(userId, input.transactionPin);
     await securityService.assertCryptoSendAllowed(userId, input.address);
 
-    const currency = input.currency.toUpperCase() as WalletCurrency;
-    if (!["USDT", "BTC", "ETH"].includes(currency)) {
-      throw new AppError("Unsupported crypto currency");
+    const currencyRaw = input.currency.toUpperCase();
+    if (!isCryptoWalletCurrency(currencyRaw)) {
+      throw new AppError(`Unsupported crypto currency ${currencyRaw}`, 400, "UNSUPPORTED_CURRENCY");
     }
+    const currency = currencyRaw;
     await ensureCryptoWallet(userId, currency);
     const bushaNet = bushaNetworkCode(input.network, currency);
     const live = useBushaLive();

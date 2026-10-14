@@ -44,6 +44,29 @@ enum WalletCurrency {
   USDT
   BTC
   ETH
+  TRX
+  SOL
+  USDC
+  BNB
+  POL
+  MATIC
+  AAVE
+  XRP
+  DOGE
+  ADA
+  LTC
+  SHIB
+  LINK
+  AVAX
+  DOT
+  TON
+  BCH
+  ATOM
+  PEPE
+  JUP
+  PYUSD
+  XLM
+  CNGN
 }
 
 enum LedgerEntryType {
@@ -337,6 +360,41 @@ model AdminUser {
   updatedAt        DateTime  @updatedAt
 }
 
+/// Shared two-person approval queue (Platform → Approvals).
+model AdminApprovalRequest {
+  id             String    @id @default(cuid())
+  /// Human-facing id e.g. APR-4411
+  publicId       String    @unique
+  cls            String
+  title          String
+  module         String    @default("Platform")
+  requesterId    String
+  requesterName  String
+  requesterEmail String
+  reason         String    @db.Text
+  risk           String    @default("medium")
+  amount         String?
+  subjectId      String?
+  sourcePath     String    @default("/admin/platform/approvals")
+  diffJson       String    @db.LongText
+  checksJson     String    @db.LongText
+  effectsJson    String?   @db.LongText
+  actionType     String?
+  actionPayload  String?   @db.LongText
+  status         String    @default("pending")
+  decidedById    String?
+  decidedByName  String?
+  decidedAt      DateTime?
+  comment        String?   @db.Text
+  expiresAt      DateTime
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([status, createdAt])
+  @@index([requesterId])
+  @@index([cls])
+}
+
 model Wallet {
   id        String         @id @default(cuid())
   userId    String
@@ -509,6 +567,9 @@ model Beneficiary {
   serviceId     String?
   customerRef   String?
   lastUsedAt    DateTime?
+  /// Set when ops blocks this destination (admin beneficiaries console).
+  blockedAt     DateTime?
+  blockedBy     String?
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 

@@ -27,8 +27,17 @@ export const ROLE_MODULES: Record<AdminRole, string[] | "*"> = {
     "/admin/bills",
     "/admin/support",
     "/admin/analytics",
+    "/admin/platform",
   ],
-  compliance: ["/admin", "/admin/customers", "/admin/money", "/admin/compliance", "/admin/support", "/admin/analytics"],
+  compliance: [
+    "/admin",
+    "/admin/customers",
+    "/admin/money",
+    "/admin/compliance",
+    "/admin/support",
+    "/admin/analytics",
+    "/admin/platform",
+  ],
   payment_ops: [
     "/admin",
     "/admin/money",
@@ -39,7 +48,7 @@ export const ROLE_MODULES: Record<AdminRole, string[] | "*"> = {
     "/admin/platform",
     "/admin/analytics",
   ],
-  finance: ["/admin", "/admin/money", "/admin/finance", "/admin/crypto", "/admin/analytics"],
+  finance: ["/admin", "/admin/money", "/admin/finance", "/admin/crypto", "/admin/analytics", "/admin/platform"],
   growth: ["/admin", "/admin/customers", "/admin/engagement", "/admin/analytics"],
   product_admin: ["/admin", "/admin/config", "/admin/bills", "/admin/cards", "/admin/crypto", "/admin/analytics"],
 };
@@ -94,7 +103,8 @@ const RESOURCE_MODULE: Record<string, string> = {
   audit: "/admin/platform",
   webhooks: "/admin/platform",
   providers: "/admin/platform",
-  approvals: "/admin/platform",
+  /** Any signed-in staff can raise / counter-sign (self-approve blocked in service). */
+  approvals: "/admin",
   closures: "/admin/platform",
 };
 

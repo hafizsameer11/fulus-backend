@@ -349,6 +349,19 @@ export class TransfersService {
   async transferBank(userId: string, input: z.infer<typeof bankTransferSchema>) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.TRANSFERS, "Transfers are temporarily disabled");
     await securityService.assertTransactionPin(userId, input.transactionPin);
+    if (input.beneficiaryId) {
+      const blocked = await prisma.beneficiary.findFirst({
+        where: { id: input.beneficiaryId, userId, blockedAt: { not: null } },
+        select: { id: true, label: true },
+      });
+      if (blocked) {
+        throw new AppError(
+          `Transfers to “${blocked.label}” are blocked. Choose another destination or contact support.`,
+          403,
+          "BENEFICIARY_BLOCKED",
+        );
+      }
+    }
     if (input.idempotencyKey) {
       const existing = await prisma.transaction.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) {

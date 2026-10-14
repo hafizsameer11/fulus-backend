@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
+import { isCryptoWalletCurrency, isFiatCurrency, isWalletCurrency } from "../../../lib/wallet-currency.js";
 import { esimGoClient } from "../../../providers/esim-go/client.js";
 import { strowalletClient } from "../../../providers/strowallet/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
@@ -167,10 +168,7 @@ export class WebhooksService {
       : null;
     if (!user) return;
 
-    const fiat = ["NGN", "USD", "SAR"].includes(currency);
-    const crypto = ["USDT", "BTC", "ETH"].includes(currency);
-
-    if (!fiat && !crypto) {
+    if (!isWalletCurrency(currency)) {
       await createInboxMessage({
         userId: user.id,
         category: "crypto",
@@ -180,36 +178,39 @@ export class WebhooksService {
       return;
     }
 
+    const walletCurrency = currency;
+    const crypto = isCryptoWalletCurrency(walletCurrency);
+
     if (crypto) {
       await prisma.wallet.upsert({
-        where: { userId_currency: { userId: user.id, currency: currency as "USDT" | "BTC" | "ETH" } },
-        create: { userId: user.id, currency: currency as "USDT" | "BTC" | "ETH", isVirtual: true, available: 0, pending: 0 },
+        where: { userId_currency: { userId: user.id, currency: walletCurrency } },
+        create: { userId: user.id, currency: walletCurrency, isVirtual: true, available: 0, pending: 0 },
         update: {},
       });
     }
 
     const tx = await walletService.credit({
       userId: user.id,
-      currency: currency as "NGN" | "USD" | "SAR" | "USDT" | "BTC" | "ETH",
+      currency: walletCurrency,
       amount,
       type: crypto ? "CRYPTO_RECEIVE" : "DEPOSIT",
       description: str(data.channel)
         ? `Bank ${String(data.channel)} deposit`
         : crypto
-          ? `Received ${currency}`
+          ? `Received ${walletCurrency}`
           : "Bank deposit",
       provider: "busha",
       providerRef: reference,
       metadata: asJson(data),
     });
 
-    if (fiat) {
+    if (isFiatCurrency(walletCurrency)) {
       await prisma.deposit.create({
         data: {
           userId: user.id,
           transactionId: tx.id,
           method: "CRYPTO",
-          currency: currency as "NGN" | "USD" | "SAR",
+          currency: walletCurrency,
           amount,
           status: "SUCCESS",
           provider: "busha",
@@ -225,7 +226,7 @@ export class WebhooksService {
       userId: user.id,
       category: crypto ? "crypto" : "wallet",
       title: crypto ? "Crypto received" : "Deposit confirmed",
-      body: `${amount} ${currency} was credited to your wallet.`,
+      body: `${amount} ${walletCurrency} was credited to your wallet.`,
     });
   }
 
@@ -422,17 +423,24 @@ export class WebhooksService {
           },
         });
         if (!already) {
-          if (["USDT", "BTC", "ETH"].includes(creditCurrency)) {
+          if (!isWalletCurrency(creditCurrency)) {
+            throw new AppError(
+              `Unsupported wallet currency ${creditCurrency}`,
+              500,
+              "UNSUPPORTED_CURRENCY",
+            );
+          }
+          if (isCryptoWalletCurrency(creditCurrency)) {
             await prisma.wallet.upsert({
               where: {
                 userId_currency: {
                   userId: order.userId,
-                  currency: creditCurrency as "USDT" | "BTC" | "ETH",
+                  currency: creditCurrency,
                 },
               },
               create: {
                 userId: order.userId,
-                currency: creditCurrency as "USDT" | "BTC" | "ETH",
+                currency: creditCurrency,
                 isVirtual: true,
                 available: 0,
                 pending: 0,
@@ -442,7 +450,7 @@ export class WebhooksService {
           }
           const receipt = await walletService.credit({
             userId: order.userId,
-            currency: creditCurrency as "NGN" | "USD" | "SAR" | "USDT" | "BTC" | "ETH",
+            currency: creditCurrency,
             amount: creditAmount,
             type: order.side === "BUY" ? "CRYPTO_BUY" : "CRYPTO_SELL",
             description: `${order.side} credit ${creditCurrency}`,

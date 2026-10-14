@@ -13,6 +13,9 @@ import { billsService } from "../../bills/services/bills.service.js";
 import { destinationsFromBundles, esimService } from "../../esim/services/esim.service.js";
 import { ADMIN_ROLES } from "../lib/roles.js";
 import { adminStaffService } from "../services/admin-staff.service.js";
+import { adminApprovalsService } from "../services/admin-approvals.service.js";
+import { adminConsoleService } from "../services/admin-console.service.js";
+import { deviceLabelFromUserAgent } from "../../../lib/user-agent.js";
 
 const roleEnum = z.enum([
   "super_admin",
@@ -38,6 +41,34 @@ const patchStaffSchema = z.object({
   role: roleEnum.optional(),
   active: z.boolean().optional(),
   password: z.string().min(10).max(128).optional(),
+});
+
+const createApprovalSchema = z.object({
+  cls: z.string().min(2).max(40),
+  title: z.string().min(3).max(240),
+  module: z.string().min(1).max(120).optional(),
+  reason: z.string().min(6).max(4000),
+  risk: z.enum(["high", "medium", "low"]).optional(),
+  amount: z.string().max(80).optional(),
+  subjectId: z.string().max(80).optional(),
+  sourcePath: z.string().max(240).optional(),
+  diff: z
+    .array(z.object({ field: z.string(), before: z.string(), after: z.string() }))
+    .max(40)
+    .optional(),
+  checks: z
+    .array(z.object({ label: z.string(), ok: z.boolean() }))
+    .max(40)
+    .optional(),
+  effects: z.array(z.string()).max(40).optional(),
+  actionType: z.string().max(80).optional(),
+  actionPayload: z.record(z.unknown()).optional(),
+  expiresInHours: z.number().int().min(1).max(168).optional(),
+});
+
+const decideApprovalSchema = z.object({
+  decision: z.enum(["approved", "rejected"]),
+  comment: z.string().max(4000).optional(),
 });
 
 function userDisplayName(user: { firstName: string | null; lastName: string | null; email: string }) {
@@ -182,6 +213,7 @@ export class AdminOpsController {
     return ok(res, {
       beneficiaries: items.map(({ user, ...b }) => ({
         ...b,
+        blocked: Boolean(b.blockedAt),
         userEmail: user.email,
         userName: userDisplayName(user),
       })),
@@ -189,6 +221,16 @@ export class AdminOpsController {
       limit,
       total,
     });
+  };
+
+  blockBeneficiary = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    return ok(res, await adminConsoleService.setBeneficiaryBlocked(id, true, req.admin?.email ?? "admin"));
+  };
+
+  unblockBeneficiary = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    return ok(res, await adminConsoleService.setBeneficiaryBlocked(id, false, req.admin?.email ?? "admin"));
   };
 
   listVirtualAccounts = async (req: Request, res: Response) => {
@@ -418,18 +460,26 @@ export class AdminOpsController {
 
   /** Asset registry: Busha mid + Fulus buy/sell spreads + customer holdings. */
   listCryptoAssets = async (_req: Request, res: Response) => {
-    const [rates, configs, holdBy] = await Promise.all([
+    const [rates, configs, holdBy, coins] = await Promise.all([
       cryptoService.rates(),
       cryptoAssetConfigService.list(),
       cryptoService.aggregateCustomerHoldings(),
+      cryptoService.coins().catch(() => [] as Array<{ code: string; name?: string; displayName?: string }>),
     ]);
     const rateBy = new Map(
       (rates as Array<Record<string, unknown>>).map((r) => [String(r.currency).toUpperCase(), r]),
+    );
+    const nameBy = new Map(
+      coins.map((c) => [
+        String(c.code).toUpperCase(),
+        String(c.name ?? c.displayName ?? c.code).trim() || String(c.code).toUpperCase(),
+      ]),
     );
     const codes = new Set<string>([
       ...configs.map((c) => c.code),
       ...rateBy.keys(),
       ...holdBy.keys(),
+      ...nameBy.keys(),
     ]);
     const assets = [...codes].sort().map((code) => {
       const cfg = configs.find((c) => c.code === code) ?? {
@@ -448,6 +498,7 @@ export class AdminOpsController {
       const priceUsd = Number(rate.usd ?? 0);
       return {
         code,
+        name: nameBy.get(code) ?? code,
         enabled: cfg.enabled,
         buyEnabled: cfg.buyEnabled,
         sellEnabled: cfg.sellEnabled,
@@ -700,9 +751,12 @@ export class AdminOpsController {
 
   listReferrals = async (req: Request, res: Response) => {
     const { page, limit, skip } = parsePagination(req);
+    const referrerId = typeof req.query.referrerId === "string" ? req.query.referrerId : undefined;
+    const where = referrerId ? { referrerUserId: referrerId } : {};
     const [total, items] = await Promise.all([
-      prisma.referralAttribution.count(),
+      prisma.referralAttribution.count({ where }),
       prisma.referralAttribution.findMany({
+        where,
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
@@ -825,7 +879,10 @@ export class AdminOpsController {
         userId: t.userId,
         userEmail: user.email,
         userName: userDisplayName(user),
-        deviceLabel: t.deviceLabel,
+        deviceLabel:
+          t.deviceLabel && t.deviceLabel !== "Unknown device"
+            ? t.deviceLabel
+            : deviceLabelFromUserAgent(t.userAgent ?? undefined),
         userAgent: t.userAgent,
         lastSeenAt: t.lastSeenAt,
         createdAt: t.createdAt,
@@ -973,6 +1030,37 @@ export class AdminOpsController {
       limit,
       total,
     });
+  };
+
+  listApprovals = async (req: Request, res: Response) => {
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const cls = typeof req.query.cls === "string" ? req.query.cls : undefined;
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const approvals = await adminApprovalsService.list({ status, cls, limit });
+    return ok(res, { approvals });
+  };
+
+  createApproval = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const input = createApprovalSchema.parse(req.body ?? {});
+    const approval = await adminApprovalsService.create(req.admin, input);
+    return ok(res, { approval }, 201);
+  };
+
+  getApproval = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    if (!id) throw new AppError("Approval id required", 400);
+    const approval = await adminApprovalsService.get(id);
+    return ok(res, { approval });
+  };
+
+  decideApproval = async (req: Request, res: Response) => {
+    if (!req.admin) throw new UnauthorizedError();
+    const id = String(req.params.id ?? "");
+    if (!id) throw new AppError("Approval id required", 400);
+    const body = decideApprovalSchema.parse(req.body ?? {});
+    const approval = await adminApprovalsService.decide(req.admin, id, body.decision, body.comment);
+    return ok(res, { approval });
   };
 }
 

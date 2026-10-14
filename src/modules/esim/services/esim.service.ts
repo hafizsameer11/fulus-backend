@@ -7,6 +7,7 @@ import { walletService } from "../../wallet/services/wallet.service.js";
 import { fxService } from "../../fx/services/fx.service.js";
 import { simIccid, simRef, useEsimGoLive } from "../../../lib/simulate.js";
 import { createInboxMessage } from "../../../lib/inbox.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 
 const PAY_CURRENCY = z.enum(["USD", "NGN", "SAR"]);
 
@@ -730,6 +731,7 @@ export class EsimService {
   }
 
   async purchase(userId: string, input: z.infer<typeof purchaseSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.ESIM, "eSIM purchases are temporarily disabled");
     const catalogBundle = await this.resolveBundle(input.bundleName);
     if (!catalogBundle) {
       throw new AppError("Unknown eSIM bundle — refresh the catalogue and try again", 400, "UNKNOWN_BUNDLE");

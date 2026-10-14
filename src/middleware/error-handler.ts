@@ -17,15 +17,20 @@ function zodUserMessage(err: ZodError): string {
     phone: "Phone",
     firstName: "First name",
     lastName: "Last name",
+    amount: "Amount",
   };
 
   // Prefer schema custom messages when present
   const msg = issue.message?.trim() || "Invalid value";
   if (!path) return msg;
 
-  // Avoid duplicating "Email: Enter a valid email…" style when message already names the field
-  const label = fieldLabels[path] ?? path;
+  // Never prefix with a raw path (e.g. "amount: …") — app toasts message as-is.
+  const label = fieldLabels[path];
+  if (!label) return msg;
+
+  // Avoid "Email: Enter a valid email…" / "Amount: Minimum bank deposit…" when copy is already complete
   if (msg.toLowerCase().includes(label.toLowerCase())) return msg;
+  if (/^[A-ZÀ-ÖØ-Þ]/.test(msg) && /[.!?]$/.test(msg)) return msg;
   return `${label}: ${msg}`;
 }
 

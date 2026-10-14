@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 
 const FIAT = ["NGN", "USD", "SAR"] as const;
 
@@ -118,6 +119,7 @@ export class FxService {
   }
 
   async executeSwap(userId: string, input: z.infer<typeof swapSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.SWAP, "FX swaps are temporarily disabled");
     if (input.idempotencyKey) {
       const existing = await prisma.transaction.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) {

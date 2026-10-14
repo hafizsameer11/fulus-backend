@@ -1,5 +1,8 @@
 import type { Prisma, TransactionStatus, TransactionType, UserStatus, WalletCurrency } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
+import { deviceLabelFromUserAgent } from "../../../lib/user-agent.js";
+import { AppError, NotFoundError } from "../../../lib/errors.js";
+import { authService } from "../../auth/services/auth.service.js";
 
 function sparkFromCounts(counts: number[], fallbackSeed = 11): number[] {
   if (counts.length >= 8) {
@@ -346,7 +349,7 @@ export class AdminConsoleService {
       if (inflowTypes.has(t.type)) bucket.inflow += amt;
       else if (outflowTypes.has(t.type)) bucket.outflow += amt;
     }
-    return { range, flow: series };
+    return { range, unit: "NGN", flow: series };
   }
 
   async overviewRails() {
@@ -356,8 +359,11 @@ export class AdminConsoleService {
       _count: true,
       where: { createdAt: { gte: since } },
     });
+    const { killKeyForRail } = await import("../../../lib/kill-switch.js");
     const kill = await prisma.platformConfig.findMany({ where: { key: { startsWith: "kill." } } });
-    const killMap = new Map(kill.map((k) => [k.key, k.value]));
+    const killMap = new Map(
+      kill.map((k) => [k.key, k.value === "1" || k.value === "true"]),
+    );
 
     const groups: Record<string, { name: string; group: string; provider: string }> = {
       WITHDRAWAL: { name: "NGN bank payout", group: "Banking", provider: "Flutterwave" },
@@ -375,11 +381,21 @@ export class AdminConsoleService {
       const ok = rows.filter((r) => r.status === "SUCCESS").reduce((s, r) => s + r._count, 0);
       // No traffic in the window is not a failure — treat as healthy with full rate.
       const successRate = total === 0 ? 100 : (ok / total) * 100;
-      const status =
-        total === 0 ? "healthy" : successRate < 50 ? "down" : successRate < 95 ? "degraded" : "healthy";
+      const railId = type.toLowerCase();
+      const killKey = killKeyForRail(railId);
+      const frozen = killKey ? Boolean(killMap.get(killKey)) : false;
+      const status = frozen
+        ? "down"
+        : total === 0
+          ? "healthy"
+          : successRate < 50
+            ? "down"
+            : successRate < 95
+              ? "degraded"
+              : "healthy";
       const provider = rows.find((r) => r.provider)?.provider ?? meta.provider;
       return {
-        id: type.toLowerCase(),
+        id: railId,
         name: meta.name,
         group: meta.group,
         provider,
@@ -388,7 +404,8 @@ export class AdminConsoleService {
         latencyMs: 200 + i * 180,
         volume24h: total,
         lastSuccess: new Date().toISOString(),
-        frozen: String(killMap.get(`kill.${type.toLowerCase()}`) ?? "") === "true",
+        frozen,
+        killKey,
       };
     });
     return { rails };
@@ -487,17 +504,123 @@ export class AdminConsoleService {
     rail?: string;
     commander?: string;
   }) {
+    const commander = input.commander?.trim() || "ops";
     const row = await prisma.adminIncident.create({
       data: {
         title: input.title,
         severity: input.severity,
         rail: input.rail ?? "",
-        commander: input.commander ?? "",
+        commander,
         status: "open",
-        timeline: [{ ts: new Date().toISOString(), who: input.commander ?? "ops", text: "Incident declared" }],
+        timeline: [{ ts: new Date().toISOString(), who: commander, text: "Incident declared" }],
       },
     });
-    return row;
+    return this.mapIncident(row);
+  }
+
+  private mapIncident(i: {
+    id: string;
+    title: string;
+    severity: string;
+    status: string;
+    rail: string;
+    commander: string;
+    timeline: unknown;
+    createdAt: Date;
+  }) {
+    return {
+      id: i.id,
+      title: i.title,
+      severity: i.severity,
+      status: i.status,
+      rail: i.rail,
+      opened: i.createdAt.toISOString(),
+      commander: i.commander,
+      timeline: (i.timeline as { ts: string; who: string; text: string }[]) ?? [],
+    };
+  }
+
+  async updateIncident(
+    id: string,
+    input: {
+      status?: string;
+      timelineEntry?: { who: string; text: string };
+      notifyInbox?: boolean;
+    },
+  ) {
+    const existing = await prisma.adminIncident.findUnique({ where: { id } });
+    if (!existing) return null;
+
+    const timeline = ([...(existing.timeline as { ts: string; who: string; text: string }[] | null) ?? []] as {
+      ts: string;
+      who: string;
+      text: string;
+    }[]);
+    if (input.timelineEntry) {
+      timeline.push({
+        ts: new Date().toISOString(),
+        who: input.timelineEntry.who,
+        text: input.timelineEntry.text,
+      });
+    }
+
+    let notified = 0;
+    if (input.notifyInbox) {
+      notified = await this.broadcastIncidentNotice(
+        existing.title,
+        input.timelineEntry?.text ?? `Incident update: ${existing.title}`,
+      );
+      timeline.push({
+        ts: new Date().toISOString(),
+        who: input.timelineEntry?.who ?? (existing.commander || "ops"),
+        text: `Status notice posted to consumer inbox (${notified} recipients).`,
+      });
+    }
+
+    const row = await prisma.adminIncident.update({
+      where: { id },
+      data: {
+        status: input.status ?? existing.status,
+        timeline,
+      },
+    });
+
+    await prisma.adminAuditLog.create({
+      data: {
+        actor: input.timelineEntry?.who ?? (existing.commander || "ops"),
+        action: input.status === "resolved" ? "incident.resolve" : "incident.update",
+        subjectId: null,
+        detail: `${id}: ${input.timelineEntry?.text ?? input.status ?? "updated"}`,
+        meta: { incidentId: id, notified },
+      },
+    });
+
+    return { ...this.mapIncident(row), notified };
+  }
+
+  /** Fan-out inbox notice to recently active customers (capped). */
+  async broadcastIncidentNotice(title: string, body: string) {
+    const { createInboxMessage } = await import("../../../lib/inbox.js");
+    const users = await prisma.user.findMany({
+      where: {
+        status: { in: ["ACTIVE", "RESTRICTED"] },
+        OR: [{ lastActiveAt: { gte: hoursAgo(24 * 30) } }, { createdAt: { gte: hoursAgo(24 * 30) } }],
+      },
+      select: { id: true },
+      take: 500,
+      orderBy: { lastActiveAt: "desc" },
+    });
+    let n = 0;
+    for (const u of users) {
+      await createInboxMessage({
+        userId: u.id,
+        title: `Service update: ${title}`.slice(0, 120),
+        body: body.slice(0, 2000),
+        category: "incident",
+      });
+      n += 1;
+    }
+    return n;
   }
 
   async overviewWork() {
@@ -749,9 +872,20 @@ export class AdminConsoleService {
         kycChecks: { orderBy: { createdAt: "desc" }, take: 50 },
         beneficiaries: { orderBy: { createdAt: "desc" }, take: 50 },
         refreshTokens: { orderBy: { lastSeenAt: "desc" }, take: 20 },
+        supportTickets: {
+          orderBy: { updatedAt: "desc" },
+          take: 20,
+          include: { messages: { orderBy: { createdAt: "desc" }, take: 1 } },
+        },
         _count: { select: { cards: true } },
         referralReceived: true,
-        referralsSent: { take: 20 },
+        referralsSent: {
+          take: 20,
+          orderBy: { createdAt: "desc" },
+          include: {
+            referred: { select: { id: true, email: true, firstName: true, lastName: true, createdAt: true } },
+          },
+        },
       },
     });
     if (!user) return null;
@@ -768,6 +902,15 @@ export class AdminConsoleService {
     });
 
     const customer = this.toCustomerDto(user);
+    const uaOs = (ua: string | null | undefined) => {
+      const s = (ua ?? "").toLowerCase();
+      if (/android/.test(s)) return "Android";
+      if (/iphone|ipad|ios/.test(s)) return "iOS";
+      if (/windows/.test(s)) return "Windows";
+      if (/mac os|macintosh/.test(s)) return "macOS";
+      if (/linux/.test(s)) return "Linux";
+      return "—";
+    };
     return {
       customer,
       wallets: user.wallets.map((w) => ({
@@ -788,14 +931,19 @@ export class AdminConsoleService {
       devices: user.refreshTokens.map((d) => ({
         id: d.id,
         customerId: id,
-        model: d.deviceLabel ?? "Unknown device",
-        os: "—",
+        model:
+          d.deviceLabel && d.deviceLabel !== "Unknown device"
+            ? d.deviceLabel
+            : deviceLabelFromUserAgent(d.userAgent ?? undefined),
+        os: uaOs(d.userAgent),
         appVersion: "—",
         ip: "—",
         geo: "—",
         lastSeen: d.lastSeenAt.toISOString(),
         trusted: !d.revokedAt,
         sharedWith: 0,
+        userAgent: d.userAgent,
+        revokedAt: d.revokedAt?.toISOString() ?? null,
       })),
       beneficiaries: user.beneficiaries.map((b) => ({
         id: b.id,
@@ -806,7 +954,28 @@ export class AdminConsoleService {
         network: b.network ?? undefined,
         addedAt: b.createdAt.toISOString(),
         usage: 0,
-        screening: "clear" as const,
+        screening: b.blockedAt ? ("flagged" as const) : ("clear" as const),
+        blocked: Boolean(b.blockedAt),
+      })),
+      referrals: user.referralsSent.map((r) => {
+        const name = [r.referred.firstName, r.referred.lastName].filter(Boolean).join(" ").trim();
+        return {
+          id: r.id,
+          invitee: name || r.referred.email,
+          inviteeEmail: r.referred.email,
+          joinedAt: r.createdAt.toISOString(),
+          activated: r.status === "REWARDED" || r.status === "QUALIFIED",
+          payout: Number(r.rewardAmount),
+          status: r.status,
+          code: r.code,
+        };
+      }),
+      supportTickets: user.supportTickets.map((t) => ({
+        id: t.id,
+        topic: t.topic,
+        status: t.status,
+        updatedAt: t.updatedAt.toISOString(),
+        lastMessage: t.messages[0]?.body ?? null,
       })),
       kycChecks: user.kycChecks,
       audits: audits.map((a) => ({
@@ -818,6 +987,143 @@ export class AdminConsoleService {
       })),
       riskSpark: sparkFromCounts([customer.risk], customer.risk || 7),
     };
+  }
+
+  async issuePasswordReset(userId: string, actor: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true } });
+    if (!user) throw new NotFoundError("Customer not found");
+    const result = await authService.forgotPassword({ email: user.email });
+    // Clear transaction PIN so the customer must set a new one after password recovery.
+    await prisma.userSecuritySettings.updateMany({
+      where: { userId },
+      data: { transactionPinHash: null, transactionPinEnabled: false },
+    });
+    await prisma.adminAuditLog.create({
+      data: {
+        actor,
+        action: "user.reset_password",
+        subjectId: userId,
+        detail: `Password reset OTP issued to ${user.email}`,
+      },
+    });
+    return { ok: true, email: user.email, simulated: Boolean((result as { simulated?: boolean }).simulated) };
+  }
+
+  async addCustomerNote(userId: string, body: string, actor: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+    if (!user) throw new NotFoundError("Customer not found");
+    const note = body.trim();
+    if (note.length < 2) throw new AppError("Note is required", 400);
+
+    let ticket = await prisma.supportTicket.findFirst({
+      where: { userId, topic: "admin-note", status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (!ticket) {
+      ticket = await prisma.supportTicket.create({
+        data: { userId, topic: "admin-note", status: "OPEN" },
+      });
+    }
+    const message = await prisma.supportMessage.create({
+      data: {
+        ticketId: ticket.id,
+        senderRole: "STAFF",
+        body: `[${actor}] ${note}`,
+      },
+    });
+    await prisma.supportTicket.update({ where: { id: ticket.id }, data: { updatedAt: new Date() } });
+    await prisma.adminAuditLog.create({
+      data: { actor, action: "user.note", subjectId: userId, detail: note.slice(0, 500) },
+    });
+    return {
+      ticket: {
+        id: ticket.id,
+        topic: ticket.topic,
+        status: ticket.status,
+        updatedAt: new Date().toISOString(),
+        lastMessage: message.body,
+      },
+    };
+  }
+
+  async previewSegment(rules: unknown) {
+    const query = this.rulesToCustomerQuery(rules);
+    const where = this.customerWhere(query);
+    const [total, users] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        take: 25,
+        orderBy: { lastActiveAt: "desc" },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          country: true,
+          kycTier: true,
+          status: true,
+          riskScore: true,
+        },
+      }),
+    ]);
+    return {
+      total,
+      customers: users.map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || u.email,
+        country: u.country ?? "—",
+        tier: u.kycTier,
+        status: mapUserStatus(u.status),
+        risk: u.riskScore,
+      })),
+    };
+  }
+
+  private rulesToCustomerQuery(rules: unknown): Record<string, string | undefined> {
+    const query: Record<string, string | undefined> = {};
+    const list = Array.isArray(rules) ? rules : [];
+    for (const raw of list) {
+      if (typeof raw === "string") {
+        const m = raw.match(/^(\S+)\s+(=|≠|≥|≤|>=|<=|>|<|contains|in last)\s+(.+)$/);
+        if (!m) continue;
+        this.applySegmentRule(query, m[1]!, m[2]!, m[3]!.trim());
+        continue;
+      }
+      if (raw && typeof raw === "object") {
+        const r = raw as { attr?: string; field?: string; op?: string; value?: string };
+        const attr = r.attr ?? r.field;
+        const op = r.op ?? "=";
+        const value = r.value;
+        if (attr && value != null && String(value).length) this.applySegmentRule(query, attr, op, String(value));
+      }
+    }
+    return query;
+  }
+
+  private applySegmentRule(
+    query: Record<string, string | undefined>,
+    attr: string,
+    op: string,
+    value: string,
+  ) {
+    if (attr === "country") query.country = value;
+    else if (attr === "tier") query.tier = value;
+    else if (attr === "status") query.status = value.toLowerCase();
+    else if (attr === "kyc") query.kyc = value.toLowerCase();
+    else if (attr === "signup_source") query.source = value.toLowerCase();
+    else if (attr === "risk_score") {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return;
+      if (op === "≥" || op === ">=" || op === ">") query.risk = n >= 80 ? "high" : n >= 55 ? "medium" : "low";
+      else if (op === "≤" || op === "<=" || op === "<") query.risk = n < 55 ? "low" : n < 80 ? "medium" : "high";
+      else query.risk = n >= 80 ? "high" : n >= 55 ? "medium" : "low";
+    } else if (attr === "last_active_at" || attr === "last_active") {
+      if (/24h|1d/i.test(value)) query.active = "24h";
+      else if (/7d|week/i.test(value)) query.active = "7d";
+      else if (/dormant|30d|inactive/i.test(value)) query.active = "dormant";
+    }
   }
 
   async setUserStatus(id: string, status: UserStatus, actor: string) {
@@ -930,13 +1236,20 @@ export class AdminConsoleService {
     const where: Prisma.TransactionWhereInput = {};
     if (query.userId) where.userId = query.userId;
     if (query.q) {
+      const q = query.q.trim();
       where.OR = [
-        { reference: { contains: query.q } },
-        { description: { contains: query.q } },
-        { providerRef: { contains: query.q } },
-        { id: { contains: query.q } },
-        { user: { email: { contains: query.q } } },
+        { reference: { contains: q } },
+        { description: { contains: q } },
+        { providerRef: { contains: q } },
+        { provider: { contains: q } },
+        { id: { contains: q } },
+        { user: { email: { contains: q } } },
+        { user: { firstName: { contains: q } } },
+        { user: { lastName: { contains: q } } },
       ];
+    }
+    if (query.provider && query.provider !== "all") {
+      where.provider = { contains: query.provider };
     }
     if (query.currency && query.currency !== "all") {
       where.currency = query.currency as WalletCurrency;
@@ -1026,6 +1339,9 @@ export class AdminConsoleService {
   }
 
   async listCardPayments(query: Record<string, string | undefined>) {
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Number(query.limit ?? 25)));
+    const skip = (page - 1) * limit;
     const where: Prisma.DepositWhereInput = { method: "CARD" };
     if (query.status && query.status !== "all") {
       const map: Record<string, TransactionStatus[]> = {
@@ -1039,18 +1355,25 @@ export class AdminConsoleService {
     }
     if (query.wallet && query.wallet !== "all") where.currency = query.wallet as WalletCurrency;
     if (query.q) {
+      const q = query.q.trim();
       where.OR = [
-        { id: { contains: query.q } },
-        { providerRef: { contains: query.q } },
-        { user: { email: { contains: query.q } } },
+        { id: { contains: q } },
+        { providerRef: { contains: q } },
+        { user: { email: { contains: q } } },
+        { user: { firstName: { contains: q } } },
+        { user: { lastName: { contains: q } } },
       ];
     }
-    const items = await prisma.deposit.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      take: 100,
-      include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
-    });
+    const [total, items] = await Promise.all([
+      prisma.deposit.count({ where }),
+      prisma.deposit.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+        include: { user: { select: { id: true, email: true, firstName: true, lastName: true } } },
+      }),
+    ]);
     const payments = items.map((d) => {
       const amount = Number(d.amount ?? 0);
       const fee = amount * 0.015;
@@ -1080,22 +1403,130 @@ export class AdminConsoleService {
         flwRef: d.providerRef ?? d.id,
       };
     });
+    const summaryWhere: Prisma.DepositWhereInput = { method: "CARD" };
+    const [successful, failed, pending] = await Promise.all([
+      prisma.deposit.count({ where: { ...summaryWhere, status: "SUCCESS" } }),
+      prisma.deposit.count({ where: { ...summaryWhere, status: "FAILED" } }),
+      prisma.deposit.count({ where: { ...summaryWhere, status: { in: ["PENDING", "PROCESSING"] } } }),
+    ]);
     const ok = payments.filter((p) => p.status === "successful");
     return {
       payments,
       summary: {
-        successful: ok.length,
+        successful,
         volume: ok.reduce((s, p) => s + p.charged, 0),
-        flagged: payments.filter((p) => p.status === "flagged").length,
-        failed: payments.filter((p) => p.status === "failed").length,
+        flagged: pending,
+        failed,
         sparks: {
-          successful: sparkFromCounts([ok.length], 81),
+          successful: sparkFromCounts([successful], 81),
           volume: sparkFromCounts([ok.reduce((s, p) => s + p.charged, 0)], 82),
-          flagged: sparkFromCounts([0], 83),
-          failed: sparkFromCounts([payments.filter((p) => p.status === "failed").length], 84),
+          flagged: sparkFromCounts([pending], 83),
+          failed: sparkFromCounts([failed], 84),
         },
       },
+      page,
+      limit,
+      total,
     };
+  }
+
+  async settleTransaction(id: string, actor: string) {
+    const tx = await prisma.transaction.findUnique({
+      where: { id },
+      include: { deposit: true },
+    });
+    if (!tx) throw new NotFoundError("Transaction not found");
+    if (tx.status === "SUCCESS") return { transaction: tx, alreadySettled: true };
+
+    if (tx.deposit && (tx.deposit.status === "PENDING" || tx.deposit.status === "PROCESSING")) {
+      const { depositsService } = await import("../../deposits/services/deposits.service.js");
+      await depositsService.confirm(tx.deposit.id);
+      await prisma.adminAuditLog.create({
+        data: {
+          actor,
+          action: "transaction.manual_settle",
+          subjectId: id,
+          detail: `Settled via deposit confirm (${tx.deposit.id})`,
+        },
+      });
+      const refreshed = await prisma.transaction.findUnique({ where: { id } });
+      return { transaction: refreshed, alreadySettled: false };
+    }
+
+    if (tx.status !== "PENDING" && tx.status !== "PROCESSING") {
+      throw new AppError(`Cannot settle transaction in status ${tx.status}`, 400);
+    }
+
+    const updated = await prisma.transaction.update({
+      where: { id },
+      data: { status: "SUCCESS" },
+    });
+    await prisma.adminAuditLog.create({
+      data: {
+        actor,
+        action: "transaction.manual_settle",
+        subjectId: id,
+        detail: `Forced status PENDING/PROCESSING → SUCCESS`,
+      },
+    });
+    return { transaction: updated, alreadySettled: false };
+  }
+
+  async refundCardPayment(depositId: string, actor: string, note?: string) {
+    const deposit = await prisma.deposit.findUnique({ where: { id: depositId } });
+    if (!deposit) throw new NotFoundError("Card payment not found");
+    if (deposit.method !== "CARD") throw new AppError("Not a card payment", 400);
+    if (deposit.status !== "SUCCESS") throw new AppError("Only successful card payments can be refunded", 400);
+
+    const amount = Number(deposit.amount ?? 0);
+    if (!(amount > 0)) throw new AppError("Invalid payment amount", 400);
+
+    const { walletService } = await import("../../wallet/services/wallet.service.js");
+    const debitTx = await walletService.debit({
+      userId: deposit.userId,
+      currency: deposit.currency,
+      amount,
+      type: "ADJUSTMENT",
+      description: `Card payment refund ${deposit.id}`,
+      provider: deposit.provider ?? "flutterwave",
+      providerRef: deposit.providerRef ?? undefined,
+      metadata: { refundOfDepositId: deposit.id, admin: actor },
+    });
+
+    await prisma.deposit.update({
+      where: { id: depositId },
+      data: { status: "REVERSED" },
+    });
+
+    const refund = await prisma.refund.create({
+      data: {
+        userId: deposit.userId,
+        transactionId: debitTx.id,
+        status: "processing",
+        origin: "admin",
+        reason: note?.trim() || "Admin refund to card",
+        rail: "card",
+        method: "original_card",
+        originalAmount: amount,
+        amount,
+        currency: deposit.currency,
+        requestedBy: actor,
+        provider: deposit.provider ?? "flutterwave",
+        providerRef: deposit.providerRef,
+        note: note?.trim() || null,
+      },
+    });
+
+    await prisma.adminAuditLog.create({
+      data: {
+        actor,
+        action: "refund.card_deposit",
+        subjectId: depositId,
+        detail: `Refund ${amount} ${deposit.currency} to card (wallet debited)`,
+      },
+    });
+
+    return { refund, depositId, transactionId: debitTx.id };
   }
 
   async listDisputes(query: Record<string, string | undefined>) {
@@ -1225,17 +1656,41 @@ export class AdminConsoleService {
   }
 
   async createSegment(input: { name: string; description: string; rules: unknown; owner: string }) {
-    const size = await prisma.user.count();
+    const preview = await this.previewSegment(input.rules);
     return prisma.customerSegment.create({
       data: {
         name: input.name,
         description: input.description,
         rules: input.rules as Prisma.InputJsonValue,
         owner: input.owner,
-        sizeCache: size,
+        sizeCache: preview.total,
         usedBy: [],
       },
     });
+  }
+
+  async setBeneficiaryBlocked(id: string, blocked: boolean, actor: string) {
+    const existing = await prisma.beneficiary.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError("Beneficiary not found");
+    const updated = await prisma.beneficiary.update({
+      where: { id },
+      data: blocked
+        ? { blockedAt: new Date(), blockedBy: actor }
+        : { blockedAt: null, blockedBy: null },
+    });
+    await prisma.adminAuditLog.create({
+      data: {
+        actor,
+        action: blocked ? "beneficiary.block" : "beneficiary.unblock",
+        subjectId: existing.userId,
+        detail: `${blocked ? "Blocked" : "Unblocked"} beneficiary ${existing.label} (${id})`,
+      },
+    });
+    return {
+      id: updated.id,
+      blocked: Boolean(updated.blockedAt),
+      blockedAt: updated.blockedAt?.toISOString() ?? null,
+    };
   }
 
   async listStatementLines() {

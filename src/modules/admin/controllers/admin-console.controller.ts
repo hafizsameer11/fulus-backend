@@ -43,7 +43,27 @@ export class AdminConsoleController {
         commander: z.string().optional(),
       })
       .parse(req.body ?? {});
-    return ok(res, await adminConsoleService.createIncident(body), 201);
+    const commander = body.commander?.trim() || req.admin?.name || req.admin?.email || "ops";
+    return ok(res, await adminConsoleService.createIncident({ ...body, commander }), 201);
+  };
+
+  updateIncident = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = z
+      .object({
+        status: z.enum(["open", "monitoring", "resolved"]).optional(),
+        text: z.string().min(3).max(2000).optional(),
+        notifyInbox: z.boolean().optional(),
+      })
+      .parse(req.body ?? {});
+    const who = req.admin?.name || req.admin?.email || "ops";
+    const updated = await adminConsoleService.updateIncident(id, {
+      status: body.status,
+      timelineEntry: body.text ? { who, text: body.text } : body.status === "resolved" ? { who, text: "Incident resolved and rails restored." } : undefined,
+      notifyInbox: body.notifyInbox,
+    });
+    if (!updated) throw new NotFoundError("Incident not found");
+    return ok(res, { incident: updated });
   };
 
   listCustomers = async (req: Request, res: Response) =>
@@ -71,6 +91,17 @@ export class AdminConsoleController {
     return ok(res, await adminConsoleService.setUserTier(id, body.tier, req.admin?.email ?? "admin"));
   };
 
+  resetPassword = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    return ok(res, await adminConsoleService.issuePasswordReset(id, req.admin?.email ?? "admin"));
+  };
+
+  addNote = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = z.object({ body: z.string().min(2).max(4000) }).parse(req.body ?? {});
+    return ok(res, await adminConsoleService.addCustomerNote(id, body.body, req.admin?.email ?? "admin"), 201);
+  };
+
   listMoneyTransactions = async (req: Request, res: Response) =>
     ok(res, await adminConsoleService.listMoneyTransactions(q(req)));
 
@@ -80,14 +111,34 @@ export class AdminConsoleController {
     return ok(res, data);
   };
 
+  settleTransaction = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    return ok(res, await adminConsoleService.settleTransaction(id, req.admin?.email ?? "admin"));
+  };
+
   listCardPayments = async (req: Request, res: Response) =>
     ok(res, await adminConsoleService.listCardPayments(q(req)));
+
+  refundCardPayment = async (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = z.object({ note: z.string().max(2000).optional() }).parse(req.body ?? {});
+    return ok(
+      res,
+      await adminConsoleService.refundCardPayment(id, req.admin?.email ?? "admin", body.note),
+      201,
+    );
+  };
 
   listDisputes = async (req: Request, res: Response) => ok(res, await adminConsoleService.listDisputes(q(req)));
 
   listRefunds = async (req: Request, res: Response) => ok(res, await adminConsoleService.listRefunds(q(req)));
 
   listSegments = async (_req: Request, res: Response) => ok(res, await adminConsoleService.listSegments());
+
+  previewSegment = async (req: Request, res: Response) => {
+    const body = z.object({ rules: z.unknown() }).parse(req.body ?? {});
+    return ok(res, await adminConsoleService.previewSegment(body.rules ?? []));
+  };
 
   createSegment = async (req: Request, res: Response) => {
     const body = z

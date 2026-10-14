@@ -59,6 +59,21 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
         return next(new UnauthorizedError("Session revoked"));
       }
 
+      if (sessionId) {
+        const session = await prisma.refreshToken.findUnique({
+          where: { id: sessionId },
+          select: { revokedAt: true, userId: true, expiresAt: true },
+        });
+        if (
+          !session ||
+          session.userId !== user.id ||
+          session.revokedAt != null ||
+          session.expiresAt.getTime() <= Date.now()
+        ) {
+          return next(new UnauthorizedError("Session revoked"));
+        }
+      }
+
       req.user = {
         id: user.id,
         email: user.email,

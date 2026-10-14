@@ -5,6 +5,7 @@ import { strowalletClient } from "../../../providers/strowallet/client.js";
 import { walletService } from "../../wallet/services/wallet.service.js";
 import { useStrowalletLive } from "../../../lib/simulate.js";
 import { AppError } from "../../../lib/errors.js";
+import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
 
 export const payBillSchema = z.object({
   category: z.enum(["AIRTIME", "DATA", "ELECTRICITY", "CABLE", "BETTING", "EDUCATION", "OTHER"]),
@@ -497,6 +498,7 @@ export class BillsService {
   }
 
   async pay(userId: string, input: z.infer<typeof payBillSchema>) {
+    await assertKillSwitchOff(KILL_SWITCH_KEYS.BILLS, "Bill payments are temporarily disabled");
     const phone = input.phone ?? input.customerRef;
     const svc = await prisma.billService.findUnique({ where: { id: input.serviceId } });
     const providerCode = svc?.providerCode ?? input.serviceId;

@@ -81,9 +81,10 @@ export class SupportService {
     return { message: userMsg };
   }
 
-  async adminListTickets(status?: string) {
-    const where =
-      status && ["OPEN", "CLOSED"].includes(status) ? { status: status as "OPEN" | "CLOSED" } : {};
+  async adminListTickets(status?: string, userId?: string) {
+    const where: { status?: "OPEN" | "CLOSED"; userId?: string } = {};
+    if (status && ["OPEN", "CLOSED"].includes(status)) where.status = status as "OPEN" | "CLOSED";
+    if (userId) where.userId = userId;
     return prisma.supportTicket.findMany({
       where,
       orderBy: { updatedAt: "desc" },

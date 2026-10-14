@@ -63,8 +63,14 @@ export type MasterPayoutResult = MasterPayoutQuote & {
 /** Approximate Busha NGN bank payout fee when simulating (₦100 + 7.5% VAT). */
 export const SIM_BANK_PAYOUT_FEE_NGN = 107.5;
 export const MIN_BUSHA_BANK_RECEIVE_NGN = 499;
-/** Busha temp-bank NGN deposit minimum (source_amount). */
-export const MIN_BUSHA_NGN_DEPOSIT = 200;
+/**
+ * Busha temp-bank NGN deposit minimum (source_amount the user pays).
+ * Quote API advertises ₦200, but POST /transfers fails with opaque 503 below ₦350
+ * (fixed ₦100 gateway fee → net credit ₦250 at the floor). Verified live 2026-10-14.
+ */
+export const MIN_BUSHA_NGN_DEPOSIT = 350;
+/** Fixed payment-gateway fee Busha deducts from temp-bank NGN deposits. */
+export const BUSHA_NGN_DEPOSIT_FEE = 100;
 
 /** Never surface vendor brand names in bank details shown to users. */
 function scrubVendorBrand(value: string | undefined): string | undefined {
@@ -118,11 +124,16 @@ export function mapBushaDepositError(err: unknown): AppError {
     }
   }
 
-  const joined = reasons.join(" ").trim();
-  const msg = joined || (err instanceof Error ? err.message : "");
-  if (/minimum|min\b|too (low|small)|below/i.test(msg)) {
+  const stripFieldPrefix = (s: string) =>
+    s.replace(/^[a-zA-Z_][a-zA-Z0-9_.]*:\s*/u, "").trim() || s.trim();
+
+  const joined = reasons.map(stripFieldPrefix).filter(Boolean).join(" ").trim();
+  const msg = stripFieldPrefix(joined || (err instanceof Error ? err.message : ""));
+  // Quote may say "minimum 200 NGN" while transfer actually requires MIN_BUSHA_NGN_DEPOSIT —
+  // always surface our verified floor, never Busha's lower quote-only number.
+  if (/minimum|min\b|too (low|small)|below|less than/i.test(msg)) {
     return new AppError(
-      sanitizePublicCopy(msg, `Minimum bank deposit is ₦${MIN_BUSHA_NGN_DEPOSIT}.`),
+      `Minimum bank deposit is ₦${MIN_BUSHA_NGN_DEPOSIT}.`,
       400,
       "MIN_DEPOSIT",
     );
