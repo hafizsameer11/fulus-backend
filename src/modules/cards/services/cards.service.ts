@@ -209,6 +209,13 @@ export class CardsService {
           continue;
         }
 
+        const remoteStatus = (sens.providerStatus ?? "").toLowerCase();
+        const cancelledRemote =
+          remoteStatus.includes("cancel") ||
+          remoteStatus.includes("terminat") ||
+          remoteStatus === "closed" ||
+          remoteStatus === "deleted";
+
         latest = await prisma.card.update({
           where: { id: card.id },
           data: {
@@ -216,6 +223,7 @@ export class CardsService {
             ...(sens.expMonth != null ? { expMonth: sens.expMonth } : {}),
             ...(sens.expYear != null ? { expYear: sens.expYear } : {}),
             ...(Number.isFinite(sens.balance) ? { balance: sens.balance } : {}),
+            ...(cancelledRemote ? { status: "TERMINATED" as const, balance: Number.isFinite(sens.balance) ? sens.balance : 0 } : {}),
             providerPayload: asJson({
               ...payloadOf(latest),
               ...(sens.pan ? { pan: sens.pan, card_number: sens.pan } : {}),
@@ -225,10 +233,14 @@ export class CardsService {
               detailsSyncedAt: new Date().toISOString(),
               detailsSyncError: null,
               rawGet: raw,
+              ...(cancelledRemote
+                ? { cancelledAtSync: new Date().toISOString(), cancelSource: "pagocards_status" }
+                : {}),
             }),
           },
         });
 
+        if (cancelledRemote) return latest;
         if (hasSensitiveDetails(latest)) return latest;
       } catch (error) {
         lastError = error instanceof Error ? error.message : "provider_get_failed";
@@ -253,10 +265,69 @@ export class CardsService {
   }
 
   async list(userId: string) {
-    const cards = await prisma.card.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
-    const synced = await Promise.all(cards.map((c) => this.syncProviderDetails(c, { onlyIfMissing: true, retries: 2 })));
-    const spentMap = await spentThisMonthByCardIds(synced.map((c) => c.id));
-    return synced.map((c) => toPublicCard(c, spentMap.get(c.id) ?? 0));
+    // Hide closed cards from the app wallet UI (TERMINATED / FAILED stay in DB for history).
+    const cards = await prisma.card.findMany({
+      where: { userId, status: { notIn: ["TERMINATED", "FAILED"] } },
+      orderBy: { createdAt: "desc" },
+    });
+    const synced = await Promise.all(
+      cards.map(async (c) => {
+        const detailed = await this.syncProviderDetails(c, { onlyIfMissing: true, retries: 2 });
+        return this.syncProviderLifecycleStatus(detailed);
+      }),
+    );
+    // Drop any that Pagocards marked cancelled during sync.
+    const visible = synced.filter((c) => !["TERMINATED", "FAILED"].includes(String(c.status).toUpperCase()));
+    const spentMap = await spentThisMonthByCardIds(visible.map((c) => c.id));
+    return visible.map((c) => toPublicCard(c, spentMap.get(c.id) ?? 0));
+  }
+
+  /** Detect Pagocards cancellation/termination even when PAN/CVV are already cached. */
+  private async syncProviderLifecycleStatus(card: NonNullable<CardRow>) {
+    if (!usePagocardsLive() || !card.providerCardId) return card;
+    if (["TERMINATED", "FAILED"].includes(String(card.status).toUpperCase())) return card;
+    try {
+      const raw = await pagocardsClient.getCard(card.providerCardId);
+      const sens = extractPagoCardSecrets(raw);
+      const remoteStatus = (sens.providerStatus ?? "").toLowerCase();
+      const cancelledRemote =
+        remoteStatus.includes("cancel") ||
+        remoteStatus.includes("terminat") ||
+        remoteStatus === "closed" ||
+        remoteStatus === "deleted";
+      if (!cancelledRemote) {
+        if (sens.providerStatus) {
+          return prisma.card.update({
+            where: { id: card.id },
+            data: {
+              ...(Number.isFinite(sens.balance) ? { balance: sens.balance } : {}),
+              providerPayload: asJson({
+                ...payloadOf(card),
+                providerStatus: sens.providerStatus,
+                lifecycleCheckedAt: new Date().toISOString(),
+              }),
+            },
+          });
+        }
+        return card;
+      }
+      return prisma.card.update({
+        where: { id: card.id },
+        data: {
+          status: "TERMINATED",
+          balance: Number.isFinite(sens.balance) ? sens.balance : 0,
+          providerPayload: asJson({
+            ...payloadOf(card),
+            providerStatus: sens.providerStatus,
+            cancelledAtSync: new Date().toISOString(),
+            cancelSource: "pagocards_status",
+            rawGet: raw,
+          }),
+        },
+      });
+    } catch {
+      return card;
+    }
   }
 
   async get(userId: string, cardId: string) {
@@ -1123,12 +1194,218 @@ export class CardsService {
     return toPublicCard(updated, spentMap.get(updated.id) ?? 0);
   }
 
+  /**
+   * Close a card: withdraw any remaining USD to the merchant Pagocards wallet first
+   * (user is credited NGN via the normal withdraw webhook/settle path), then terminate.
+   * Unlike regular withdraw, termination is allowed to empty the card (no $5 retain).
+   */
   async terminate(userId: string, cardId: string) {
     const card = await this.get(userId, cardId);
-    if (usePagocardsLive() && card.providerCardId) {
-      await pagocardsClient.terminateCard({ card_id: card.providerCardId });
+    if (String(card.status).toUpperCase() === "TERMINATED") {
+      return toPublicCard(card);
     }
-    return prisma.card.update({ where: { id: card.id }, data: { status: "TERMINATED" } });
+    if (String(card.status).toUpperCase() === "FROZEN") {
+      throw new AppError("Unfreeze the card before terminating so remaining funds can be withdrawn", 400);
+    }
+
+    const live = usePagocardsLive();
+    let balance = Number(card.balance);
+
+    // Prefer live Pagocards balance so we don't leave provider funds behind.
+    if (live && card.providerCardId) {
+      try {
+        const remote = await pagocardsClient.getCard(card.providerCardId);
+        const remoteBal = pagoDisplayBalance(pagoPayloadData(remote));
+        if (remoteBal >= 0) balance = remoteBal;
+      } catch {
+        // Fall back to local ledger balance.
+      }
+    }
+
+    let withdrawResult: Awaited<ReturnType<CardsService["withdrawFullBalanceForTerminate"]>> | null = null;
+    if (balance > 0.009) {
+      if (!card.providerCardId && live) {
+        throw new AppError("Card has a balance but is not linked to the provider; cannot safely terminate", 400);
+      }
+      withdrawResult = await this.withdrawFullBalanceForTerminate(userId, card, balance);
+      balance = 0;
+    }
+
+    if (live && card.providerCardId) {
+      try {
+        await pagocardsClient.terminateCard({ card_id: card.providerCardId });
+      } catch (err) {
+        // Funds already pulled — still mark closed locally so the user isn't stuck.
+        // Ops can retry provider terminate; withdraw settle continues via webhook.
+        console.error("[cards.terminate] provider terminate failed after withdraw", {
+          cardId: card.id,
+          providerCardId: card.providerCardId,
+          error: err instanceof Error ? err.message : err,
+        });
+      }
+    }
+
+    const updated = await prisma.card.update({
+      where: { id: card.id },
+      data: {
+        status: "TERMINATED",
+        balance: 0,
+        providerPayload: asJson({
+          ...payloadOf(card),
+          terminatedAt: new Date().toISOString(),
+          terminateWithdrawTxId: withdrawResult?.transactionId ?? null,
+          terminateWithdrawUsd: withdrawResult?.amountUsd ?? 0,
+        }),
+      },
+    });
+
+    if (withdrawResult?.amountUsd) {
+      await createInboxMessage({
+        userId,
+        category: "transaction",
+        title: "Card closed — funds returning",
+        body: `Your Visa ••${card.last4 ?? "••••"} was closed. $${withdrawResult.amountUsd.toFixed(2)} is being returned to your NGN wallet.`,
+      });
+    }
+
+    return {
+      card: toPublicCard(updated),
+      withdrawnUsd: withdrawResult?.amountUsd ?? 0,
+      withdrawStatus: withdrawResult?.status ?? null,
+      message: withdrawResult?.amountUsd
+        ? "Card terminated. Remaining balance was withdrawn; NGN credits after confirmation."
+        : "Card terminated.",
+    };
+  }
+
+  /** Empty the card for termination (bypasses normal $5 retain rule). */
+  private async withdrawFullBalanceForTerminate(
+    userId: string,
+    card: Awaited<ReturnType<CardsService["get"]>>,
+    amountUsd: number,
+  ) {
+    const amount = Math.round(amountUsd * 100) / 100;
+    if (!(amount > 0)) return null;
+    if (!card.providerCardId) throw new AppError("Card is not ready for withdrawal");
+
+    const live = usePagocardsLive();
+    const providerRef = makeReference("PCW");
+    const pendingTx = await prisma.transaction.create({
+      data: {
+        userId,
+        type: "CARD_WITHDRAW",
+        status: "PROCESSING",
+        amount,
+        currency: "USD",
+        reference: makeReference("TX"),
+        provider: live ? "pagocards" : "simulated",
+        providerRef,
+        description: sanitizePublicCopy(
+          `Terminate withdraw $${amount} from Visa ••${card.last4 ?? "••••"} → NGN`,
+        ),
+        metadata: asJson({
+          kind: "card_withdraw",
+          reason: "terminate",
+          cardId: card.id,
+          providerCardId: card.providerCardId,
+          amountUsd: amount,
+          settleCurrency: "NGN",
+          awaitingWebhook: live,
+        }),
+      },
+    });
+
+    try {
+      const providerResult = live
+        ? await pagocardsClient.withdrawVisaCard({
+            card_id: card.providerCardId,
+            amount,
+          })
+        : {
+            simulated: true,
+            status: "completed",
+            data: {
+              card_id: card.providerCardId,
+              display_amount: amount,
+              transaction_id: `WD_SIM_${Date.now()}`,
+            },
+          };
+
+      const data = pagoPayloadData(providerResult);
+      const pagoTxId =
+        pickPagoString(data, ["transaction_id", "transactionId", "id"]) ??
+        pickPagoString(asRecord(providerResult), ["transaction_id"]);
+      const providerStatus = (pickPagoString(data, ["status"]) ?? "completed").toLowerCase();
+
+      if (providerStatus === "failed" || providerStatus === "fail") {
+        await this.failWithdraw(pendingTx.id, amount, card.id, "Provider rejected termination withdraw");
+        throw new AppError("Could not withdraw card balance before terminate", 502);
+      }
+
+      await prisma.cardFunding.create({
+        data: {
+          cardId: card.id,
+          transactionId: pendingTx.id,
+          amount,
+          direction: "WITHDRAW",
+          providerRef: pagoTxId ?? providerRef,
+        },
+      });
+
+      await prisma.card.update({
+        where: { id: card.id },
+        data: {
+          balance: 0,
+          providerPayload: asJson({
+            ...payloadOf(card),
+            lastWithdraw: providerResult,
+            lastWithdrawTxId: pendingTx.id,
+            lastWithdrawReason: "terminate",
+          }),
+        },
+      });
+
+      await prisma.transaction.update({
+        where: { id: pendingTx.id },
+        data: {
+          providerRef: pagoTxId ?? providerRef,
+          metadata: asJson({
+            kind: "card_withdraw",
+            reason: "terminate",
+            cardId: card.id,
+            providerCardId: card.providerCardId,
+            amountUsd: amount,
+            settleCurrency: "NGN",
+            awaitingWebhook: live,
+            pagoTxId,
+            providerStatus,
+            raw: providerResult,
+          }),
+        },
+      });
+
+      if (!live) {
+        await this.settleWithdrawToNgn({
+          transactionId: pendingTx.id,
+          eventId: `sim_terminate_${pendingTx.id}`,
+        });
+        return { transactionId: pendingTx.id, amountUsd: amount, status: "SUCCESS" as const };
+      }
+
+      return { transactionId: pendingTx.id, amountUsd: amount, status: "PROCESSING" as const };
+    } catch (error) {
+      const stillPending = await prisma.transaction.findUnique({ where: { id: pendingTx.id } });
+      if (stillPending?.status === "PROCESSING") {
+        await prisma.transaction.update({
+          where: { id: pendingTx.id },
+          data: {
+            status: "FAILED",
+            description: `Terminate withdraw failed: ${error instanceof Error ? error.message : "error"}`,
+          },
+        });
+      }
+      throw error;
+    }
   }
 
   async statements(userId: string, cardId: string) {
