@@ -276,6 +276,17 @@ export class AuthService {
       otp = await this.issueOtp(user.email, EmailOtpPurpose.SIGNUP);
     }
 
+    // Login alert — respects notifPrefs.login + Expo push tokens.
+    void import("../../../lib/inbox.js").then(({ createInboxMessage }) =>
+      createInboxMessage({
+        userId: user.id,
+        category: "login",
+        title: "New sign-in",
+        body: "Someone signed in to your Fulus account. If this wasn’t you, change your password and review sessions.",
+        data: { sessionId: tokens.sessionId },
+      }),
+    );
+
     return {
       user: publicUser(user),
       accessToken: tokens.accessToken,

@@ -64,6 +64,9 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional().default(""),
   SMTP_PASS: z.string().optional().default(""),
   EMAIL_FROM: z.string().default("Fulus <noreply@fulusapp.co>"),
+
+  /** Optional Expo push security access token */
+  EXPO_ACCESS_TOKEN: z.string().optional().default(""),
 });
 
 const parsed = envSchema.safeParse(process.env);

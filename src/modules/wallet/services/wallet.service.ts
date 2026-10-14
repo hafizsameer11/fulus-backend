@@ -3,6 +3,7 @@ import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { maybeSendTxReceiptEmail } from "../../../lib/tx-receipt-email.js";
+import { maybeSendPush } from "../../../lib/push.js";
 
 const RECEIPT_TYPES = new Set<string>([
   "DEPOSIT",
@@ -124,6 +125,17 @@ export class WalletService {
           description: description ?? null,
           reference: transaction.reference,
         });
+        const amt = Number(amount);
+        const amtStr = Number.isFinite(amt)
+          ? amt.toLocaleString(undefined, { maximumFractionDigits: 2 })
+          : String(amount);
+        void maybeSendPush({
+          userId: params.userId,
+          title: `${params.type.replace(/_/g, " ")} credited`,
+          body: `${params.currency} ${amtStr}${description ? ` · ${description}` : ""}`,
+          category: "tx",
+          data: { transactionId: transaction.id, type: params.type },
+        });
       }
       return transaction;
     });
@@ -199,6 +211,17 @@ export class WalletService {
           currency: params.currency,
           description: description ?? null,
           reference: transaction.reference,
+        });
+        const amt = Number(amount);
+        const amtStr = Number.isFinite(amt)
+          ? amt.toLocaleString(undefined, { maximumFractionDigits: 2 })
+          : String(amount);
+        void maybeSendPush({
+          userId: params.userId,
+          title: `${params.type.replace(/_/g, " ")} debit`,
+          body: `${params.currency} ${amtStr}${description ? ` · ${description}` : ""}`,
+          category: "tx",
+          data: { transactionId: transaction.id, type: params.type },
         });
       }
       return transaction;
