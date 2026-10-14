@@ -6,6 +6,7 @@ import { walletService } from "../../wallet/services/wallet.service.js";
 import { useStrowalletLive } from "../../../lib/simulate.js";
 import { AppError } from "../../../lib/errors.js";
 import { assertKillSwitchOff, KILL_SWITCH_KEYS } from "../../../lib/kill-switch.js";
+import { maybeSendEducationPinEmail } from "../../../lib/tx-receipt-email.js";
 
 export const payBillSchema = z.object({
   category: z.enum(["AIRTIME", "DATA", "ELECTRICITY", "CABLE", "BETTING", "EDUCATION", "OTHER"]),
@@ -100,28 +101,63 @@ function extractToken(providerResult: unknown): string | undefined {
   const content = digRecord(response?.content);
   const transactions = digRecord(content?.transactions);
 
-  const candidates: unknown[] = [
+  const digitCandidates: unknown[] = [
     root.token,
     root.Token,
+    root.pin,
+    root.Pin,
+    root.PIN,
     root.purchased_code,
     root.purchasedCode,
     response?.Token,
     response?.token,
+    response?.pin,
+    response?.Pin,
     response?.purchased_code,
     response?.purchasedCode,
     data?.token,
     data?.Token,
+    data?.pin,
     data?.purchased_code,
     transactions?.token,
     transactions?.Token,
+    transactions?.purchased_code,
     root.message,
     response?.message,
   ];
 
-  for (const c of candidates) {
+  for (const c of digitCandidates) {
     if (typeof c === "string") {
       const cleaned = cleanTokenValue(c);
       if (cleaned) return cleaned;
+    }
+  }
+
+  // Education purchased_code / pin fields may be alphanumeric (skip free-text messages).
+  const pinFields: unknown[] = [
+    root.pin,
+    root.Pin,
+    root.PIN,
+    root.purchased_code,
+    root.purchasedCode,
+    response?.pin,
+    response?.Pin,
+    response?.purchased_code,
+    response?.purchasedCode,
+    data?.pin,
+    data?.purchased_code,
+    transactions?.purchased_code,
+  ];
+  for (const c of pinFields) {
+    if (typeof c !== "string") continue;
+    const loose = c.replace(/^Token\s*:?\s*/i, "").trim().replace(/\s+/g, "");
+    if (
+      loose.length >= 4 &&
+      loose.length <= 64 &&
+      /^[A-Za-z0-9-]+$/.test(loose) &&
+      !/^(success|successful|pending|failed|ok)$/i.test(loose)
+    ) {
+      return loose;
     }
   }
 
@@ -499,9 +535,20 @@ export class BillsService {
 
   async pay(userId: string, input: z.infer<typeof payBillSchema>) {
     await assertKillSwitchOff(KILL_SWITCH_KEYS.BILLS, "Bill payments are temporarily disabled");
-    const phone = input.phone ?? input.customerRef;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { phone: true, email: true },
+    });
     const svc = await prisma.billService.findUnique({ where: { id: input.serviceId } });
     const providerCode = svc?.providerCode ?? input.serviceId;
+
+    // Never treat candidate names / meter numbers as the notify phone unless they look like NG mobiles.
+    const phone =
+      normalizeNgPhone(input.phone) ??
+      normalizeNgPhone(user?.phone) ??
+      (looksLikeNgPhone(input.customerRef) ? normalizeNgPhone(input.customerRef) : null) ??
+      input.phone ??
+      input.customerRef;
 
     if (input.category === "BETTING") {
       throw new AppError("Betting top-up is not available yet", 400, "UNSUPPORTED_BILL");
@@ -523,6 +570,13 @@ export class BillsService {
       }
       if (!input.variationCode) {
         throw new AppError("Select an education product", 400, "VALIDATION_ERROR");
+      }
+      if (!normalizeNgPhone(input.phone) && !normalizeNgPhone(user?.phone)) {
+        throw new AppError(
+          "Add a Nigerian phone number on your profile (or this screen) so we can deliver your PIN",
+          400,
+          "PHONE_REQUIRED",
+        );
       }
     }
 
@@ -587,14 +641,24 @@ export class BillsService {
             customer_id: input.customerRef,
           });
           break;
-        case "EDUCATION":
+        case "EDUCATION": {
+          const eduPhone =
+            normalizeNgPhone(input.phone) ?? normalizeNgPhone(user?.phone) ?? normalizeNgPhone(phone);
+          if (!eduPhone) {
+            throw new AppError(
+              "Add a Nigerian phone number on your profile so we can deliver your PIN",
+              400,
+              "PHONE_REQUIRED",
+            );
+          }
           providerResult = await strowalletClient.buyEducational({
             amount: input.amount,
-            phone,
+            phone: eduPhone,
             service_name: providerCode || "waec",
             variation_code: input.variationCode ?? "waecdirect",
           });
           break;
+        }
         default:
           throw new AppError(`Unsupported bill category: ${input.category}`, 400, "UNSUPPORTED_BILL");
       }
@@ -602,7 +666,14 @@ export class BillsService {
       const token = extractToken(providerResult);
       const units = extractUnits(providerResult);
       const customerName = extractCustomerName(providerResult);
-      const displayToken = token ? formatRechargeToken(token) : undefined;
+      // Electricity tokens get dashed formatting; education PINs stay as returned.
+      const displayToken =
+        token && input.category === "ELECTRICITY" ? formatRechargeToken(token) : token;
+
+      const notifyPhoneStored =
+        input.category === "EDUCATION"
+          ? normalizeNgPhone(input.phone) ?? normalizeNgPhone(user?.phone) ?? phone
+          : phone;
 
       const payment = await prisma.billPayment.create({
         data: {
@@ -613,7 +684,7 @@ export class BillsService {
           customerRef: input.customerRef,
           variationCode: input.variationCode,
           amount: input.amount,
-          phone,
+          phone: notifyPhoneStored,
           provider: "strowallet",
           status: "SUCCESS",
           token: displayToken ?? token,
@@ -638,11 +709,23 @@ export class BillsService {
         },
       });
 
+      if (input.category === "EDUCATION" && (displayToken ?? token)) {
+        void maybeSendEducationPinEmail({
+          userId,
+          pin: String(displayToken ?? token),
+          productName: svc?.name ?? "Education PIN",
+          candidateName: input.customerRef,
+          amount: input.amount,
+          reference: walletTx.reference,
+        });
+      }
+
       return {
         ...payment,
         token: displayToken ?? token ?? payment.token,
         units: units ?? null,
         customerName: customerName ?? null,
+        email: user?.email ?? null,
         transaction: { ...walletTx, status: "SUCCESS" },
       };
     } catch (error) {
@@ -660,11 +743,16 @@ export class BillsService {
 }
 
 function looksLikeNgPhone(value?: string | null) {
-  if (!value) return false;
+  return Boolean(normalizeNgPhone(value));
+}
+
+/** Local 11-digit NG mobile (0803…) or null. */
+function normalizeNgPhone(value?: string | null): string | null {
+  if (!value) return null;
   let raw = value.replace(/\D/g, "");
   if (raw.startsWith("234")) raw = raw.slice(3);
   if (raw.length === 10 && !raw.startsWith("0")) raw = `0${raw}`;
-  return /^0[789]\d{9}$/.test(raw);
+  return /^0[789]\d{9}$/.test(raw) ? raw : null;
 }
 
 export const billsService = new BillsService();

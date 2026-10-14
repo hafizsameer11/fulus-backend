@@ -10,6 +10,15 @@ type ReceiptInput = {
   reference?: string | null;
 };
 
+type EducationPinInput = {
+  userId: string;
+  pin: string;
+  productName?: string | null;
+  candidateName?: string | null;
+  amount: string | number;
+  reference?: string | null;
+};
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -60,5 +69,60 @@ export async function maybeSendTxReceiptEmail(input: ReceiptInput): Promise<void
     await sendEmail({ to: user.email, subject, html, text });
   } catch (err) {
     console.error("[tx-receipt-email] failed", err);
+  }
+}
+
+/** Always email education PINs to the account holder (delivery is not optional). */
+export async function maybeSendEducationPinEmail(input: EducationPinInput): Promise<void> {
+  try {
+    const pin = input.pin.trim();
+    if (!pin) return;
+
+    const user = await prisma.user.findUnique({
+      where: { id: input.userId },
+      select: { email: true },
+    });
+    if (!user?.email) return;
+
+    const amount = Number(input.amount);
+    const amtStr = Number.isFinite(amount)
+      ? `₦${amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+      : String(input.amount);
+    const product = input.productName?.trim() || "Education PIN";
+    const candidate = input.candidateName?.trim();
+    const subject = `Your ${product} · Fulus`;
+    const text = [
+      `Your ${product} is ready.`,
+      candidate ? `Candidate: ${candidate}` : null,
+      `Amount: ${amtStr}`,
+      `PIN: ${pin}`,
+      input.reference ? `Reference: ${input.reference}` : null,
+      "",
+      "Keep this PIN private. You can also copy it from the Fulus app receipt.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const html = `
+      <div style="font-family:Inter,Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#0A0A0A">
+        <div style="font-size:20px;font-weight:700;margin-bottom:8px">Fulus</div>
+        <p style="margin:0 0 12px;color:#444">${product} ready</p>
+        <div style="background:#FFFBEA;border-radius:12px;padding:16px 20px">
+          ${candidate ? `<div style="font-size:13px;color:#666">Candidate · ${candidate}</div>` : ""}
+          <div style="font-size:13px;color:#666;margin-top:4px">${amtStr}</div>
+          <div style="font-size:12px;color:#666;margin-top:12px;text-transform:uppercase;letter-spacing:0.08em">PIN</div>
+          <div style="font-size:26px;font-weight:700;letter-spacing:2px;margin-top:4px">${pin}</div>
+          ${input.reference ? `<div style="margin-top:10px;font-size:12px;color:#888">Ref ${input.reference}</div>` : ""}
+        </div>
+        <p style="margin:16px 0 0;font-size:12px;color:#666">Keep this PIN private. You can also open the receipt in the Fulus app.</p>
+      </div>
+    `;
+
+    if (!emailConfigured() && process.env.NODE_ENV === "production") {
+      console.error("[education-pin-email] SMTP not configured — PIN not emailed");
+      return;
+    }
+    await sendEmail({ to: user.email, subject, html, text });
+  } catch (err) {
+    console.error("[education-pin-email] failed", err);
   }
 }
