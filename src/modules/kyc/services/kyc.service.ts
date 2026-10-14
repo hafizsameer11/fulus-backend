@@ -17,6 +17,8 @@ export const bvnSchema = z.object({
 export const ninSchema = z.object({
   number: z.string().regex(/^\d{11}$/, "NIN must be 11 digits"),
   dateOfBirth: z.string().min(4).max(32),
+  /** Nigerian mobile — saved on the profile for Busha KYC / delivery. */
+  phone: z.string().min(10, "Enter your phone number").max(15),
   /** Base64 or data-URL selfie — required for Prembly NIN+face + Busha KYC */
   image: z.string().min(40, "Selfie image is required"),
 });
@@ -164,11 +166,23 @@ export class KycService {
   }
 
   async verifyNin(userId: string, input: z.infer<typeof ninSchema>) {
-    await this.assertPhoneForKyc(userId);
+    if (!hasUsablePhone(input.phone)) {
+      throw new AppError(
+        "Enter a valid Nigerian phone number (e.g. 08012345678).",
+        400,
+        "PHONE_REQUIRED",
+      );
+    }
+    // Persist phone before Prembly/Busha so crypto KYC has a real number.
+    await prisma.user.update({
+      where: { id: userId },
+      data: { phone: input.phone.replace(/\D/g, "").slice(0, 15) },
+    });
     // Do not persist raw selfie bytes in DB input — keep metadata only.
     const check = await this.beginCheck(userId, "NIN", {
       number: input.number,
       dateOfBirth: input.dateOfBirth,
+      phone: input.phone,
       hasImage: true,
     });
     // Mirror selfie step as FACE pending so crypto / profile can show under-review.
@@ -327,6 +341,9 @@ export class KycService {
         data: {
           nin: input.number,
           dateOfBirth: input.dateOfBirth,
+          ...(hasUsablePhone(input.phone)
+            ? { phone: input.phone.replace(/\D/g, "").slice(0, 15) }
+            : {}),
         },
       });
 
