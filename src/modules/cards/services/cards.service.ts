@@ -1015,18 +1015,26 @@ export class CardsService {
 
   async freeze(userId: string, cardId: string) {
     const card = await this.get(userId, cardId);
-    if (!card.providerCardId) throw new AppError("Card is not ready");
+    if (!card.providerCardId) throw new AppError("Card is not ready", 400, "CARD_NOT_READY");
     if (usePagocardsLive()) {
-      await pagocardsClient.blockVisaCard({ card_id: card.providerCardId });
+      try {
+        await pagocardsClient.blockVisaCard({ card_id: card.providerCardId });
+      } catch {
+        throw new AppError("Could not freeze card. Try again in a moment.", 502, "CARD_FREEZE_FAILED");
+      }
     }
     return prisma.card.update({ where: { id: card.id }, data: { status: "FROZEN" } });
   }
 
   async unfreeze(userId: string, cardId: string) {
     const card = await this.get(userId, cardId);
-    if (!card.providerCardId) throw new AppError("Card is not ready");
+    if (!card.providerCardId) throw new AppError("Card is not ready", 400, "CARD_NOT_READY");
     if (usePagocardsLive()) {
-      await pagocardsClient.unblockVisaCard({ card_id: card.providerCardId });
+      try {
+        await pagocardsClient.unblockVisaCard({ card_id: card.providerCardId });
+      } catch {
+        throw new AppError("Could not unfreeze card. Try again in a moment.", 502, "CARD_UNFREEZE_FAILED");
+      }
     }
     return prisma.card.update({ where: { id: card.id }, data: { status: "ACTIVE" } });
   }
