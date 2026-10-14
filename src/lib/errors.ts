@@ -56,7 +56,7 @@ export function sanitizePublicCopy(message: string | null | undefined, fallback 
   if (!msg) return fallback;
 
   msg = msg.replace(
-    /^(strowallet|busha|prembly|pagocards|pago|flutterwave|esim-go|esim go|payaza)\s*:\s*/i,
+    /^(strowallet|busha|prembly|pagocards|pago\s*cards|pago|flutterwave|esim-go|esim go|payaza)\s*:\s*/i,
     "",
   ).trim();
 
