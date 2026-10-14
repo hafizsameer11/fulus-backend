@@ -1433,7 +1433,8 @@ export class CardsService {
           type: { in: ["CARD_FUND", "CARD_WITHDRAW", "FEE", "ADJUSTMENT"] },
           OR: [
             ...(card.providerCardId ? [{ providerRef: card.providerCardId }] : []),
-            { metadata: { path: ["cardId"], equals: cardId } },
+            // MySQL JSON path must be a string (e.g. "$.cardId"), not a Postgres-style array.
+            { metadata: { path: "$.cardId", equals: cardId } },
           ],
         },
         orderBy: { createdAt: "desc" },
