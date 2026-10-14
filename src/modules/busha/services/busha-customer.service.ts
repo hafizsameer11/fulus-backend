@@ -26,14 +26,22 @@ export function toBushaBirthDate(iso: string): string {
 
 export function toE164Ng(phone?: string | null): string {
   const digits = String(phone ?? "").replace(/\D/g, "");
-  if (!digits) return "+234 8010000000";
-  if (digits.startsWith("234") && digits.length >= 13) {
-    return `+234 ${digits.slice(3)}`;
+  if (!digits || digits.length < 10) {
+    throw new Error("Phone number is required before Busha KYC");
   }
-  if (digits.startsWith("0") && digits.length >= 11) {
-    return `+234 ${digits.slice(1)}`;
+  const national = digits.startsWith("234") ? digits.slice(3) : digits.replace(/^0/, "");
+  if (!national || national === "8010000000" || national.startsWith("801000000")) {
+    throw new Error("A real phone number is required before Busha KYC");
   }
-  return `+234 ${digits}`;
+  // Compact E.164 (no spaces). Spaced forms like "+234 810…" make Busha's
+  // dashboard country/+number split look wrong (e.g. +234 | 234 810…).
+  return `+234${national}`;
+}
+
+/** Keep Fulus kycStatus aligned with Busha without a hard circular import at load time. */
+async function refreshFulusKycStatus(userId: string) {
+  const { kycService } = await import("../../kyc/services/kyc.service.js");
+  await kycService.syncTier(userId);
 }
 
 function stripDataUrl(image: string): string {
@@ -86,6 +94,10 @@ export class BushaCustomerService {
         body: "Your NIN selfie passed. Crypto profile was created in demo mode.",
       });
       return { id: fakeId, status: "active", simulated: true };
+    }
+
+    if (!user.phone || String(user.phone).replace(/\D/g, "").length < 10) {
+      throw new Error("Add your phone number in Profile before crypto KYC");
     }
 
     const { firstName, lastName } = namesFromPrembly(input.premblyResult, user.firstName, user.lastName);
@@ -164,15 +176,24 @@ export class BushaCustomerService {
         lastName,
       },
     });
+    // Fulus APPROVED only when Busha is active (syncTier enforces this).
+    await refreshFulusKycStatus(user.id);
 
     await createInboxMessage({
       userId: user.id,
       category: "kyc",
-      title: status === "active" ? "Crypto KYC approved" : "Crypto KYC submitted",
+      title:
+        status === "active"
+          ? "KYC approved"
+          : status === "rejected"
+            ? "KYC rejected"
+            : "KYC submitted",
       body:
         status === "active"
           ? "Your identity check passed. Crypto trading is unlocked."
-          : "Your NIN and selfie were submitted for review. We'll notify you when verification finishes.",
+          : status === "rejected"
+            ? "Crypto verification was rejected. Update your phone/details and resubmit NIN + selfie."
+            : "Your NIN and selfie were submitted for review. We'll notify you when verification finishes.",
     });
 
     return { id: customerId, status, payload: createPayload };
@@ -186,19 +207,20 @@ export class BushaCustomerService {
       where: { id: user.id },
       data: { bushaCustomerStatus: status },
     });
+    await refreshFulusKycStatus(user.id);
 
     if (status === "active") {
       await createInboxMessage({
         userId: user.id,
         category: "kyc",
-        title: "Crypto KYC approved",
+        title: "KYC approved",
         body: "Your identity check passed. You can use crypto features.",
       });
     } else if (status === "rejected") {
       await createInboxMessage({
         userId: user.id,
         category: "kyc",
-        title: "Crypto KYC rejected",
+        title: "KYC rejected",
         body: rejectionReason?.trim()
           ? `${rejectionReason.trim()} Open Verification to update your details.`
           : "We could not verify your documents. Open Verification to resubmit NIN and selfie.",
@@ -207,7 +229,7 @@ export class BushaCustomerService {
       await createInboxMessage({
         userId: user.id,
         category: "kyc",
-        title: "Crypto KYC under review",
+        title: "KYC under review",
         body: "Your identity verification is still under review.",
       });
     }

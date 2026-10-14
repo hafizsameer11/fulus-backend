@@ -107,6 +107,17 @@ function runInBackground(label: string, work: () => Promise<void>) {
   });
 }
 
+/** True when the user has a real NG mobile on their profile (not empty / placeholder). */
+export function hasUsablePhone(phone?: string | null): boolean {
+  const digits = String(phone ?? "").replace(/\D/g, "");
+  if (digits.length < 10) return false;
+  // Block the legacy Busha placeholder (+234 8010000000) and obvious fakes.
+  const national = digits.startsWith("234") ? digits.slice(3) : digits.replace(/^0/, "");
+  if (!national || /^0+$/.test(national)) return false;
+  if (national === "8010000000" || national.startsWith("801000000")) return false;
+  return true;
+}
+
 export class KycService {
   async listChecks(userId: string) {
     return prisma.kycCheck.findMany({
@@ -125,7 +136,23 @@ export class KycService {
     return [...map.values()];
   }
 
+  /** KYC steps require a phone on the profile first (Busha rejects placeholder numbers). */
+  private async assertPhoneForKyc(userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { phone: true },
+    });
+    if (!hasUsablePhone(user?.phone)) {
+      throw new AppError(
+        "Add your phone number in Profile before starting verification.",
+        400,
+        "PHONE_REQUIRED",
+      );
+    }
+  }
+
   async verifyBvn(userId: string, input: z.infer<typeof bvnSchema>) {
+    await this.assertPhoneForKyc(userId);
     const check = await this.beginCheck(userId, "BVN", {
       number: input.number,
       phone: input.phone,
@@ -137,6 +164,7 @@ export class KycService {
   }
 
   async verifyNin(userId: string, input: z.infer<typeof ninSchema>) {
+    await this.assertPhoneForKyc(userId);
     // Do not persist raw selfie bytes in DB input — keep metadata only.
     const check = await this.beginCheck(userId, "NIN", {
       number: input.number,
@@ -151,6 +179,7 @@ export class KycService {
   }
 
   async verifyAddress(userId: string, input: z.infer<typeof addressSchema>) {
+    await this.assertPhoneForKyc(userId);
     const { documentImage, ...meta } = input;
     const check = await this.beginCheck(userId, "ADDRESS", {
       ...meta,
@@ -161,6 +190,7 @@ export class KycService {
   }
 
   async verifyFace(userId: string, input: z.infer<typeof faceSchema>) {
+    await this.assertPhoneForKyc(userId);
     const check = await this.beginCheck(userId, "FACE", {
       hasImage: Boolean(input.image),
       selfieToken: input.selfieToken,
@@ -303,7 +333,8 @@ export class KycService {
       await this.passCheck(checkId, userId, "NIN", result);
       await this.passLatestPendingOrCreate(userId, "FACE", result);
 
-      // Prembly approved → create Busha customer + submit KYC with NIN + DOB + selfie
+      // Prembly approved → create Busha customer + submit KYC with NIN + DOB + selfie.
+      // Fulus kycStatus stays PENDING until Busha returns active (see syncTier).
       try {
         await bushaCustomerService.createFromNinKyc({
           userId,
@@ -312,8 +343,10 @@ export class KycService {
           selfieImage: input.image,
           premblyResult: result,
         });
+        await this.syncTier(userId);
       } catch (err) {
         console.error("[kyc] busha customer create failed", err);
+        await this.syncTier(userId);
         await createInboxMessage({
           userId,
           category: "kyc",
@@ -694,8 +727,18 @@ export class KycService {
     return Boolean(r.data || r.nin_data);
   }
 
-  private async syncTier(userId: string) {
-    const checks = await prisma.kycCheck.findMany({ where: { userId } });
+  /**
+   * Tier follows Prembly checks; overall kycStatus is APPROVED only when Busha is active.
+   * Prembly-only success must not unlock the app as fully verified.
+   */
+  async syncTier(userId: string) {
+    const [checks, user] = await Promise.all([
+      prisma.kycCheck.findMany({ where: { userId } }),
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { bushaCustomerStatus: true },
+      }),
+    ]);
     const passedTypes = new Set(checks.filter((c) => c.status === "PASSED").map((c) => c.type));
 
     let kycTier = 0;
@@ -711,9 +754,13 @@ export class KycService {
       if (!latestByType.has(c.type)) latestByType.set(c.type, c);
     }
     const hasLatestFailure = [...latestByType.values()].some((c) => c.status === "FAILED");
+    const bushaStatus = String(user?.bushaCustomerStatus ?? "").toLowerCase();
+    const bushaActive = bushaStatus === "active";
+    const bushaRejected = bushaStatus === "rejected";
 
     let kycStatus: "PENDING" | "APPROVED" | "REJECTED" = "PENDING";
-    if (kycTier >= 1 && !hasPending) kycStatus = "APPROVED";
+    if (bushaActive && kycTier >= 1 && !hasPending) kycStatus = "APPROVED";
+    else if (bushaRejected && !hasPending) kycStatus = "REJECTED";
     else if (hasLatestFailure && kycTier === 0 && !hasPending) kycStatus = "REJECTED";
     else kycStatus = "PENDING";
 
