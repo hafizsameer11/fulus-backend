@@ -1132,8 +1132,11 @@ export class CardsService {
   }
 
   async statements(userId: string, cardId: string) {
-    const card = await this.get(userId, cardId);
-    const [fundings, authorizations] = await Promise.all([
+    // Do not call syncing `get()` here — Pagocards retries would delay / fail the activity feed.
+    const card = await prisma.card.findFirst({ where: { id: cardId, userId } });
+    if (!card) throw new NotFoundError("Card not found");
+
+    const [fundings, authorizations, walletTxs] = await Promise.all([
       prisma.cardFunding.findMany({
         where: { cardId },
         include: { transaction: true },
@@ -1145,6 +1148,18 @@ export class CardsService {
           ? { OR: [{ cardId }, { last4: card.last4 }] }
           : { cardId },
         orderBy: { at: "desc" },
+        take: 50,
+      }),
+      prisma.transaction.findMany({
+        where: {
+          userId,
+          type: { in: ["CARD_FUND", "CARD_WITHDRAW", "FEE", "ADJUSTMENT"] },
+          OR: [
+            ...(card.providerCardId ? [{ providerRef: card.providerCardId }] : []),
+            { metadata: { path: ["cardId"], equals: cardId } },
+          ],
+        },
+        orderBy: { createdAt: "desc" },
         take: 50,
       }),
     ]);
@@ -1160,6 +1175,39 @@ export class CardsService {
       transactionId: f.transactionId,
     }));
 
+    const fundingTxIds = new Set(fundingRows.map((r) => r.transactionId).filter(Boolean));
+
+    const walletRows = walletTxs
+      .filter((t) => !fundingTxIds.has(t.id))
+      .map((t) => {
+        const meta = (t.metadata && typeof t.metadata === "object" ? t.metadata : {}) as Record<string, unknown>;
+        const kind =
+          t.type === "CARD_WITHDRAW"
+            ? "withdraw"
+            : t.type === "CARD_FUND"
+              ? "fund"
+              : "fee";
+        const amount =
+          kind === "fund" && typeof meta.cardAmount === "number"
+            ? meta.cardAmount
+            : Number(t.amount);
+        return {
+          id: t.id,
+          kind,
+          amount,
+          currency: String(t.currency || "USD"),
+          merchant:
+            kind === "withdraw"
+              ? "Card withdraw"
+              : kind === "fund"
+                ? "Card top-up"
+                : t.description?.trim() || "Card fee",
+          status: String(t.status).toLowerCase(),
+          createdAt: t.createdAt,
+          transactionId: t.id as string | null,
+        };
+      });
+
     const authRows = authorizations.map((a) => ({
       id: a.id,
       kind: "spend",
@@ -1171,7 +1219,7 @@ export class CardsService {
       transactionId: null as string | null,
     }));
 
-    return [...fundingRows, ...authRows]
+    return [...fundingRows, ...walletRows, ...authRows]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, 80);
   }
