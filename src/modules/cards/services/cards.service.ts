@@ -4,7 +4,7 @@ import { prisma } from "../../../lib/prisma.js";
 import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { pagocardsClient } from "../../../providers/pagocards/client.js";
-import { PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
+import { PAGO_CARD_BILLING_ADDRESS, PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
 import {
   cardExtraFundUsd,
   cardFundDebitUsd,
@@ -106,6 +106,20 @@ function limitsFromPayload(p: Record<string, unknown>) {
   };
 }
 
+/** Flat billing fields mobile `mapApiCard` reads from the card DTO / payload. */
+function fixedBillingPayloadFields() {
+  const b = PAGO_CARD_BILLING_ADDRESS;
+  return {
+    billing: { ...b },
+    billingLine1: b.line1,
+    billingLine2: b.line2,
+    billingCity: b.city,
+    billingState: b.state,
+    billingZip: b.postal_code,
+    billingCountry: b.country,
+  };
+}
+
 function toPublicCard(card: NonNullable<CardRow>, spentThisMonth = 0) {
   const p = payloadOf(card);
   const pan = pickPagoString(p, ["pan", "card_number", "cardnumber"]) ?? null;
@@ -116,6 +130,7 @@ function toPublicCard(card: NonNullable<CardRow>, spentThisMonth = 0) {
       ? `${String(card.expMonth).padStart(2, "0")}/${String(card.expYear).slice(-2)}`
       : null);
   const limits = limitsFromPayload(p);
+  const billing = fixedBillingPayloadFields();
 
   return {
     ...card,
@@ -130,6 +145,8 @@ function toPublicCard(card: NonNullable<CardRow>, spentThisMonth = 0) {
     dailyLimit: limits.dailyLimit || null,
     monthlyLimit: limits.monthlyLimit || null,
     perTxLimit: limits.perTxLimit || null,
+    // Fixed issuer AVS address for every card (not user-editable)
+    ...billing,
   };
 }
 
@@ -412,11 +429,7 @@ export class CardsService {
                 defaultFundTxId,
                 extraFundUsd: extraFund,
                 extraFundTxId,
-                billing: {
-                  line1: "1 Admiralty Way",
-                  city: "Lagos",
-                  country: "NG",
-                },
+                ...fixedBillingPayloadFields(),
               }),
             },
           });
@@ -483,6 +496,7 @@ export class CardsService {
               defaultInitialLoadUsd: defaultLoad,
               defaultFundTxId,
               desiredOnCardUsd: desiredOnCard,
+              ...fixedBillingPayloadFields(),
             }),
           },
         });
