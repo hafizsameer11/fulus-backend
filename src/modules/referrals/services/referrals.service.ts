@@ -50,17 +50,47 @@ export class ReferralsService {
     throw new AppError("Could not allocate referral code", 500);
   }
 
-  async applyReferralAtSignup(referredUserId: string, codeRaw: string | undefined) {
-    if (!codeRaw?.trim()) return null;
+  async findReferrerByCode(codeRaw: string) {
     const code = normalizeCode(codeRaw);
     const bare = bareCode(code);
-
-    const referrer = await prisma.user.findFirst({
+    if (bare.length < 3) return null;
+    return prisma.user.findFirst({
       where: {
         OR: [{ referralCode: code }, { referralCode: bare }, { referralCode: formatDisplayCode(bare) }],
       },
+      select: { id: true, firstName: true, lastName: true, referralCode: true },
     });
-    if (!referrer || referrer.id === referredUserId) return null;
+  }
+
+  /** Public check used by signup before account creation. */
+  async validateReferralCode(codeRaw: string | undefined) {
+    if (!codeRaw?.trim()) {
+      return { valid: false as const, reason: "empty" as const };
+    }
+    const bare = bareCode(codeRaw);
+    if (bare.length < 3 || bare.length > 32) {
+      return { valid: false as const, reason: "format" as const };
+    }
+    const referrer = await this.findReferrerByCode(codeRaw);
+    if (!referrer?.referralCode) {
+      return { valid: false as const, reason: "not_found" as const };
+    }
+    const display = formatDisplayCode(referrer.referralCode);
+    const name = [referrer.firstName, referrer.lastName].filter(Boolean).join(" ").trim();
+    return {
+      valid: true as const,
+      code: display,
+      referrerName: name || undefined,
+    };
+  }
+
+  async applyReferralAtSignup(referredUserId: string, codeRaw: string | undefined) {
+    if (!codeRaw?.trim()) return null;
+    const bare = bareCode(codeRaw);
+    const referrer = await this.findReferrerByCode(codeRaw);
+    if (!referrer || referrer.id === referredUserId) {
+      throw new AppError("That referral code is not valid", 400, "REFERRAL_INVALID");
+    }
 
     const existing = await prisma.referralAttribution.findUnique({ where: { referredUserId } });
     if (existing) return existing;

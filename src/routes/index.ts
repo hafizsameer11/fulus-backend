@@ -65,6 +65,7 @@ apiRouter.post("/sessions/revoke-all", requireAuth, asyncHandler(sessionsControl
 apiRouter.post("/sessions/revoke-current", requireAuth, asyncHandler(sessionsController.revokeCurrent));
 apiRouter.post("/sessions/:id/revoke", requireAuth, asyncHandler(sessionsController.revoke));
 apiRouter.get("/referrals/me", requireAuth, asyncHandler(referralsController.me));
+apiRouter.get("/referrals/validate", asyncHandler(referralsController.validate));
 apiRouter.post("/support/tickets", requireAuth, asyncHandler(supportController.create));
 apiRouter.get("/support/tickets", requireAuth, asyncHandler(supportController.list));
 apiRouter.get("/support/tickets/:id", requireAuth, asyncHandler(supportController.get));
