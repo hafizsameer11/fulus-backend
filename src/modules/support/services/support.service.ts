@@ -81,6 +81,31 @@ export class SupportService {
     return { message: userMsg };
   }
 
+  async closeTicket(userId: string, ticketId: string) {
+    const ticket = await prisma.supportTicket.findFirst({ where: { id: ticketId, userId } });
+    if (!ticket) throw new NotFoundError("Ticket not found");
+    if (ticket.status === "CLOSED") return ticket;
+    return prisma.supportTicket.update({
+      where: { id: ticketId },
+      data: { status: "CLOSED" },
+      include: { messages: { orderBy: { createdAt: "asc" }, take: 1 } },
+    });
+  }
+
+  /** Re-open a closed ticket so the user can continue the thread. */
+  async reopenTicket(userId: string, ticketId: string) {
+    const ticket = await prisma.supportTicket.findFirst({ where: { id: ticketId, userId } });
+    if (!ticket) throw new NotFoundError("Ticket not found");
+    if (ticket.status === "OPEN") {
+      return this.getTicket(userId, ticketId);
+    }
+    return prisma.supportTicket.update({
+      where: { id: ticketId },
+      data: { status: "OPEN" },
+      include: { messages: { orderBy: { createdAt: "asc" } } },
+    });
+  }
+
   async adminListTickets(status?: string, userId?: string) {
     const where: { status?: "OPEN" | "CLOSED"; userId?: string } = {};
     if (status && ["OPEN", "CLOSED"].includes(status)) where.status = status as "OPEN" | "CLOSED";

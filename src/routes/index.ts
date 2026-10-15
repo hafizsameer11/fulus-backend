@@ -69,6 +69,8 @@ apiRouter.post("/support/tickets", requireAuth, asyncHandler(supportController.c
 apiRouter.get("/support/tickets", requireAuth, asyncHandler(supportController.list));
 apiRouter.get("/support/tickets/:id", requireAuth, asyncHandler(supportController.get));
 apiRouter.post("/support/tickets/:id/messages", requireAuth, asyncHandler(supportController.message));
+apiRouter.post("/support/tickets/:id/close", requireAuth, asyncHandler(supportController.close));
+apiRouter.post("/support/tickets/:id/reopen", requireAuth, asyncHandler(supportController.reopen));
 apiRouter.get("/inbox", requireAuth, asyncHandler(usersController.inbox));
 apiRouter.post("/inbox/:id/read", requireAuth, asyncHandler(usersController.markInboxRead));
 

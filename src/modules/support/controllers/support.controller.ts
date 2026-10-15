@@ -30,6 +30,16 @@ export class SupportController {
       await supportService.postMessage(req.user.id, String(req.params.id ?? ""), postMessageSchema.parse(req.body)),
     );
   };
+
+  close = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await supportService.closeTicket(req.user.id, String(req.params.id ?? "")));
+  };
+
+  reopen = async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError();
+    return ok(res, await supportService.reopenTicket(req.user.id, String(req.params.id ?? "")));
+  };
 }
 
 export const supportController = new SupportController();
