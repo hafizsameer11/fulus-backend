@@ -785,6 +785,15 @@ export class KycService {
       where: { id: userId },
       data: { kycTier, kycStatus },
     });
+
+    if (kycStatus === "APPROVED") {
+      try {
+        const { referralsService } = await import("../../referrals/services/referrals.service.js");
+        await referralsService.qualifyAndRewardForUser(userId);
+      } catch {
+        // Referral payout must not block KYC sync.
+      }
+    }
   }
 }
 

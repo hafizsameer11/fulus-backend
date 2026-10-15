@@ -8,7 +8,16 @@ import { resolveAvatarAbsPath, saveUserAvatar } from "../../../lib/avatar-storag
 export const updateProfileSchema = z.object({
   firstName: z.string().min(1).optional(),
   lastName: z.string().min(1).optional(),
-  phone: z.string().min(8).optional().nullable(),
+  /** Phone is required when provided — empty / null clears are rejected. */
+  phone: z
+    .string()
+    .trim()
+    .min(8, "Phone number is required")
+    .max(32)
+    .optional()
+    .refine((v) => v === undefined || v.replace(/\D/g, "").length >= 8, {
+      message: "Enter a valid phone number",
+    }),
   /** Base64 or data-URL image for profile photo */
   avatar: z.string().min(40).optional(),
   /** Notification preferences stored on user.flagsJson */
@@ -134,12 +143,19 @@ export class UsersService {
       };
     }
 
+    if (input.phone !== undefined) {
+      const digits = input.phone.replace(/\D/g, "");
+      if (!input.phone.trim() || digits.length < 8) {
+        throw new AppError("Phone number is required", 400, "PHONE_REQUIRED");
+      }
+    }
+
     const user = await prisma.user.update({
       where: { id: userId },
       data: {
         ...(input.firstName !== undefined && !nameLocked ? { firstName: input.firstName } : {}),
         ...(input.lastName !== undefined && !nameLocked ? { lastName: input.lastName } : {}),
-        ...(input.phone !== undefined ? { phone: input.phone } : {}),
+        ...(input.phone !== undefined ? { phone: input.phone.trim() } : {}),
         ...(avatarPath !== undefined ? { avatarPath } : {}),
         ...(nextFlags !== undefined
           ? { flagsJson: nextFlags as Prisma.InputJsonValue }

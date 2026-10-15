@@ -197,6 +197,8 @@ export class AuthService {
           createdAt: true,
         },
       });
+      // Apply invite code if they didn't have one yet (idempotent).
+      await referralsService.applyReferralAtSignup(user.id, input.referralCode);
       const otp = await this.issueOtp(email, EmailOtpPurpose.SIGNUP);
       const tokens = await this.authTokens(user.id, user.email, req);
       return {
