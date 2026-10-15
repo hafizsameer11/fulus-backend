@@ -53,17 +53,10 @@ const envSchema = z.object({
     .default("1")
     .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
 
-  /** Custom SMTP (Hostinger, etc.) — required in production for OTP / reset emails */
-  SMTP_HOST: z.string().optional().default(""),
-  SMTP_PORT: z.coerce.number().default(465),
-  SMTP_SECURE: z
-    .string()
-    .optional()
-    .default("true")
-    .transform((v) => v !== "0" && v.toLowerCase() !== "false"),
-  SMTP_USER: z.string().optional().default(""),
-  SMTP_PASS: z.string().optional().default(""),
-  EMAIL_FROM: z.string().default("Fulus <noreply@fulusapp.co>"),
+  /** Resend API key — required in production for OTP / reset / receipt emails */
+  RESEND_API_KEY: z.string().optional().default(""),
+  /** Must use a verified Resend domain (e.g. notify.fulusapp.co) */
+  EMAIL_FROM: z.string().default("Fulus <noreply@notify.fulusapp.co>"),
 
   /** Optional Expo push security access token */
   EXPO_ACCESS_TOKEN: z.string().optional().default(""),

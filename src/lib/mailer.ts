@@ -1,4 +1,3 @@
-import nodemailer from "nodemailer";
 import { env } from "../config/env.js";
 import { AppError } from "./errors.js";
 
@@ -10,24 +9,12 @@ type SendEmailInput = {
 };
 
 export function emailConfigured() {
-  return Boolean(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS);
-}
-
-function createTransport() {
-  return nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port: env.SMTP_PORT,
-    secure: env.SMTP_SECURE,
-    auth: {
-      user: env.SMTP_USER,
-      pass: env.SMTP_PASS,
-    },
-  });
+  return Boolean(env.RESEND_API_KEY);
 }
 
 /**
- * Sends transactional email via custom SMTP (e.g. Hostinger).
- * Without SMTP credentials: logs in non-production; throws in production.
+ * Sends transactional email via Resend (https://resend.com).
+ * Without RESEND_API_KEY: logs in non-production; throws in production.
  */
 export async function sendEmail(input: SendEmailInput) {
   if (!emailConfigured()) {
@@ -39,17 +26,38 @@ export async function sendEmail(input: SendEmailInput) {
   }
 
   try {
-    const transport = createTransport();
-    const info = await transport.sendMail({
-      from: env.EMAIL_FROM,
-      to: input.to,
-      subject: input.subject,
-      html: input.html,
-      text: input.text,
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: env.EMAIL_FROM,
+        to: [input.to],
+        subject: input.subject,
+        html: input.html,
+        text: input.text,
+      }),
     });
-    return { id: info.messageId || "sent", simulated: false as const };
+
+    const body = (await res.json().catch(() => ({}))) as {
+      id?: string;
+      message?: string;
+      name?: string;
+      statusCode?: number;
+    };
+
+    if (!res.ok) {
+      const detail = body.message || body.name || `Resend HTTP ${res.status}`;
+      console.error("[mailer] Resend error", res.status, body);
+      throw new AppError(detail, 502, "EMAIL_SEND_FAILED");
+    }
+
+    return { id: body.id || "sent", simulated: false as const };
   } catch (err) {
-    console.error("[mailer] SMTP error", err);
+    if (err instanceof AppError) throw err;
+    console.error("[mailer] Resend error", err);
     throw new AppError(
       err instanceof Error ? err.message : "Failed to send email",
       502,

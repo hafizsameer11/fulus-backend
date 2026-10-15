@@ -118,7 +118,7 @@ export async function maybeSendEducationPinEmail(input: EducationPinInput): Prom
     `;
 
     if (!emailConfigured() && process.env.NODE_ENV === "production") {
-      console.error("[education-pin-email] SMTP not configured — PIN not emailed");
+      console.error("[education-pin-email] Resend not configured — PIN not emailed");
       return;
     }
     await sendEmail({ to: user.email, subject, html, text });
