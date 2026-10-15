@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
-import { AppError, NotFoundError, sanitizePublicCopy } from "../../../lib/errors.js";
+import { AppError, NotFoundError, ProviderError, sanitizePublicCopy } from "../../../lib/errors.js";
 import { makeReference } from "../../../lib/http.js";
 import { pagocardsClient } from "../../../providers/pagocards/client.js";
 import { PAGO_CARD_BILLING_ADDRESS, PAGO_VISA_BIN_HINT } from "../../../providers/pagocards/constants.js";
@@ -77,6 +77,76 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Pull Pagocards error code / message from ProviderError.details.upstream. */
+function pagoUpstreamBlob(err: unknown): Record<string, unknown> {
+  if (!(err instanceof ProviderError)) return {};
+  const details = asRecord(err.details);
+  return asRecord(details.upstream);
+}
+
+function pagoErrorToken(err: unknown): string {
+  const up = pagoUpstreamBlob(err);
+  const nested = asRecord(up.data);
+  const parts = [
+    up.code,
+    up.error_code,
+    up.errorCode,
+    up.error,
+    up.message,
+    nested.code,
+    nested.error_code,
+    nested.errorCode,
+    nested.message,
+    err instanceof Error ? err.message : "",
+  ]
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+  return parts.join(" ").toUpperCase();
+}
+
+function isPagoAlreadyBlockedError(err: unknown): boolean {
+  const t = pagoErrorToken(err);
+  return (
+    t.includes("CARD_BLOCK_FAILED") ||
+    t.includes("ALREADY_BLOCK") ||
+    t.includes("ALREADY BLOCK") ||
+    t.includes("ALREADY_FROZEN") ||
+    t.includes("ALREADY FROZEN") ||
+    (t.includes("BLOCK") && t.includes("ALREADY"))
+  );
+}
+
+function isPagoUnblockFailedError(err: unknown): boolean {
+  const t = pagoErrorToken(err);
+  return t.includes("CARD_UNBLOCK_FAILED") || (t.includes("UNBLOCK") && t.includes("FAIL"));
+}
+
+function isPagoFrozenStatus(status: string | undefined | null): boolean {
+  const s = String(status ?? "").toLowerCase();
+  if (!s) return false;
+  return (
+    s.includes("freeze") ||
+    s.includes("frozen") ||
+    s.includes("block") ||
+    s === "inactive" ||
+    s.includes("disabled")
+  );
+}
+
+function isPagoActiveStatus(status: string | undefined | null): boolean {
+  const s = String(status ?? "").toLowerCase();
+  if (!s) return false;
+  if (isPagoFrozenStatus(s)) return false;
+  return (
+    s.includes("normal") ||
+    s.includes("active") ||
+    s.includes("ok") ||
+    s.includes("live") ||
+    s.includes("unfreeze") ||
+    s.includes("unblock")
+  );
 }
 
 type CardRow = Awaited<ReturnType<typeof prisma.card.findFirst>> & object;
@@ -1098,29 +1168,93 @@ export class CardsService {
     return null;
   }
 
+  /** Read live Pagocards status; used to treat already-blocked / delayed-unblock as success. */
+  private async pagoRemoteStatus(providerCardId: string): Promise<string | undefined> {
+    try {
+      const raw = await pagocardsClient.getCard(providerCardId);
+      return extractPagoCardSecrets(raw).providerStatus;
+    } catch {
+      return undefined;
+    }
+  }
+
   async freeze(userId: string, cardId: string) {
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready", 400, "CARD_NOT_READY");
+
+    // Idempotent: already frozen in our DB — don't hit Pagocards again (double-tap → 422).
+    if (String(card.status).toUpperCase() === "FROZEN") {
+      return card;
+    }
+
     if (usePagocardsLive()) {
       try {
         await pagocardsClient.blockVisaCard({ card_id: card.providerCardId });
-      } catch {
-        throw new AppError("Could not freeze card. Try again in a moment.", 502, "CARD_FREEZE_FAILED");
+      } catch (err) {
+        // Pagocards returns 422 CARD_BLOCK_FAILED when already blocked — treat as success.
+        if (isPagoAlreadyBlockedError(err)) {
+          // ok
+        } else {
+          const remote = await this.pagoRemoteStatus(card.providerCardId);
+          if (!isPagoFrozenStatus(remote)) {
+            throw new AppError("Could not freeze card. Try again in a moment.", 502, "CARD_FREEZE_FAILED");
+          }
+        }
       }
     }
+
     return prisma.card.update({ where: { id: card.id }, data: { status: "FROZEN" } });
   }
 
   async unfreeze(userId: string, cardId: string) {
     const card = await this.get(userId, cardId);
     if (!card.providerCardId) throw new AppError("Card is not ready", 400, "CARD_NOT_READY");
+
+    // Idempotent: already active — skip provider call.
+    if (String(card.status).toUpperCase() === "ACTIVE") {
+      return card;
+    }
+
     if (usePagocardsLive()) {
-      try {
-        await pagocardsClient.unblockVisaCard({ card_id: card.providerCardId });
-      } catch {
-        throw new AppError("Could not unfreeze card. Try again in a moment.", 502, "CARD_UNFREEZE_FAILED");
+      // Pagocards often rejects unblock for ~10–15s after a freeze; retry with backoff.
+      const delaysMs = [0, 3500, 5500, 8000];
+      let lastErr: unknown;
+      let unblocked = false;
+
+      for (let i = 0; i < delaysMs.length; i++) {
+        if (delaysMs[i]! > 0) await sleep(delaysMs[i]!);
+        try {
+          await pagocardsClient.unblockVisaCard({ card_id: card.providerCardId });
+          unblocked = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+          // Already active on their side — treat as success.
+          const remote = await this.pagoRemoteStatus(card.providerCardId);
+          if (isPagoActiveStatus(remote)) {
+            unblocked = true;
+            break;
+          }
+          if (!isPagoUnblockFailedError(err) && !(err instanceof ProviderError)) {
+            break;
+          }
+          // CARD_UNBLOCK_FAILED / transient 422 — wait and try again.
+        }
+      }
+
+      if (!unblocked) {
+        const remote = await this.pagoRemoteStatus(card.providerCardId);
+        if (!isPagoActiveStatus(remote)) {
+          throw new AppError(
+            "Could not unfreeze card yet. Wait a few seconds after freezing, then try again.",
+            502,
+            "CARD_UNFREEZE_FAILED",
+            lastErr instanceof ProviderError ? lastErr.details : undefined,
+          );
+        }
       }
     }
+
     return prisma.card.update({ where: { id: card.id }, data: { status: "ACTIVE" } });
   }
 
