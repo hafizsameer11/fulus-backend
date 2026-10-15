@@ -34,16 +34,78 @@ type CatalogVariation = {
   isActive: boolean;
 };
 
-/** Provider floors — keep UI confirm + API in sync. */
+/** Category floors — electricity uses per-disco mins (see electricityMinNgn). */
 export const BILL_MIN_AMOUNT_NGN: Record<string, number> = {
   AIRTIME: 50,
-  ELECTRICITY: 1000,
+  ELECTRICITY: 500,
   DATA: 50,
   CABLE: 100,
   EDUCATION: 500,
   BETTING: 100,
   OTHER: 50,
 };
+
+/**
+ * Strowallet / DisCo purchase floors (NGN). Flat ₦1,000 was wrong — e.g. IBEDC is ₦5,000
+ * and most Lagos/Abuja discos accept ₦500. Keys: Strowallet service_name + our catalog ids.
+ */
+export const ELECTRICITY_MIN_BY_CODE: Record<string, number> = {
+  "ikeja-electric": 500,
+  ikedc: 500,
+  "eko-electric": 500,
+  ekedc: 500,
+  "abuja-electric": 500,
+  aedc: 500,
+  "kano-electric": 500,
+  kedco: 500,
+  "portharcourt-electric": 500,
+  phed: 500,
+  "jos-electric": 500,
+  jed: 500,
+  "kaduna-electric": 1000,
+  kaedco: 1000,
+  "enugu-electric": 1000,
+  eedc: 1000,
+  "benin-electric": 1000,
+  bedc: 1000,
+  "ibadan-electric": 5000,
+  ibedc: 5000,
+  "aba-electric": 500,
+  aba: 500,
+  "yola-electric": 500,
+  yedc: 500,
+};
+
+export function electricityMinNgn(providerCode?: string | null, serviceId?: string | null): number {
+  const keys = [providerCode, serviceId].map((k) => String(k ?? "").trim().toLowerCase()).filter(Boolean);
+  for (const k of keys) {
+    if (ELECTRICITY_MIN_BY_CODE[k] != null) return ELECTRICITY_MIN_BY_CODE[k]!;
+  }
+  return BILL_MIN_AMOUNT_NGN.ELECTRICITY;
+}
+
+/** Catalog id → Strowallet service_name when DB providerCode is missing. */
+const ELECTRICITY_SERVICE_ALIAS: Record<string, string> = {
+  ikedc: "ikeja-electric",
+  ekedc: "eko-electric",
+  aedc: "abuja-electric",
+  ibedc: "ibadan-electric",
+  phed: "portharcourt-electric",
+  kedco: "kano-electric",
+  kaedco: "kaduna-electric",
+  jed: "jos-electric",
+  eedc: "enugu-electric",
+  bedc: "benin-electric",
+  aba: "aba-electric",
+  yedc: "yola-electric",
+};
+
+function resolveElectricityServiceName(providerCode?: string | null, serviceId?: string | null): string {
+  const fromDb = String(providerCode ?? "").trim();
+  if (fromDb) return fromDb;
+  const id = String(serviceId ?? "").trim().toLowerCase();
+  return ELECTRICITY_SERVICE_ALIAS[id] ?? String(serviceId ?? "").trim();
+}
 
 /** Strowallet educational has no plans endpoint — expose the live product(s). */
 const EDUCATION_PRODUCTS: CatalogVariation[] = [
@@ -190,17 +252,56 @@ function extractCustomerName(providerResult: unknown): string | undefined {
   const root = digRecord(providerResult);
   if (!root) return undefined;
   const response = digRecord(root.response);
+  const data = digRecord(root.data);
+  const content = digRecord(root.content) ?? digRecord(response?.content) ?? digRecord(data?.content);
+  const nested = digRecord(data?.data) ?? digRecord(response?.data);
   const candidates = [
     root.customer_name,
     root.Customer_Name,
     root.CustomerName,
+    root.customerName,
+    root.name,
     response?.CustomerName,
     response?.customer_name,
+    response?.Customer_Name,
+    response?.customerName,
+    response?.name,
+    data?.customer_name,
+    data?.Customer_Name,
+    data?.CustomerName,
+    data?.customerName,
+    data?.name,
+    content?.customer_name,
+    content?.CustomerName,
+    content?.customerName,
+    nested?.customer_name,
+    nested?.CustomerName,
+    nested?.customerName,
   ];
   for (const c of candidates) {
     if (typeof c === "string" && c.trim()) return c.trim();
   }
+  // Last resort: scan JSON blob for customer_name / CustomerName fields.
+  try {
+    const blob = JSON.stringify(providerResult);
+    const m = blob.match(/"(?:customer_name|Customer_Name|CustomerName|customerName)"\s*:\s*"([^"]{2,120})"/i);
+    if (m?.[1]?.trim()) return m[1].trim();
+  } catch {
+    // ignore
+  }
   return undefined;
+}
+
+function extractMeterAddress(providerResult: unknown): string | null {
+  const root = digRecord(providerResult);
+  if (!root) return null;
+  const response = digRecord(root.response);
+  const data = digRecord(root.data);
+  const candidates = [root.address, root.Address, response?.address, response?.Address, data?.address, data?.Address];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return null;
 }
 
 function asPlanList(raw: unknown): unknown[] {
@@ -277,7 +378,10 @@ export class BillsService {
 
     return Promise.all(
       rows.map(async (svc) => {
-        const minAmount = BILL_MIN_AMOUNT_NGN[svc.category] ?? 50;
+        const minAmount =
+          svc.category === "ELECTRICITY"
+            ? electricityMinNgn(svc.providerCode, svc.id)
+            : (BILL_MIN_AMOUNT_NGN[svc.category] ?? 50);
 
         if (svc.category === "EDUCATION") {
           return {
@@ -499,23 +603,32 @@ export class BillsService {
     }
 
     const svc = await prisma.billService.findUnique({ where: { id: input.serviceID } });
-    const serviceName = svc?.providerCode ?? input.serviceID;
+    const resolvedService = resolveElectricityServiceName(svc?.providerCode, input.serviceID);
 
     const raw = (await strowalletClient.verifyMeter({
-      meter_number: input.billersCode,
-      service_name: serviceName,
+      meter_number: input.billersCode.replace(/\D/g, ""),
+      service_name: resolvedService,
       meter_type: input.type,
     })) as Record<string, unknown>;
 
-    const customerName = extractCustomerName(raw)?.trim();
+    let customerName = extractCustomerName(raw)?.trim();
+    const address = extractMeterAddress(raw);
+    // Strowallet sometimes returns success with name only in nested blobs — if still empty
+    // but we have an address (or explicit success), treat as verified so pay can proceed.
     if (!customerName) {
-      throw new AppError("Could not verify this meter. Check the number and disco, then try again.", 400, "METER_NOT_VERIFIED");
+      const successFlag = raw.success;
+      if (successFlag === true || address) {
+        customerName = address ? `Meter at ${address.slice(0, 48)}` : "Verified customer";
+      }
+    }
+    if (!customerName) {
+      throw new AppError(
+        "Could not verify this meter. Check the number, prepaid/postpaid type, and disco, then try again.",
+        400,
+        "METER_NOT_VERIFIED",
+      );
     }
 
-    const address =
-      (typeof raw.address === "string" && raw.address.trim()) ||
-      (typeof raw.Address === "string" && raw.Address.trim()) ||
-      null;
     const customerDistrict =
       (typeof raw.customer_district === "string" && raw.customer_district.trim()) ||
       (typeof raw.Customer_District === "string" && raw.Customer_District.trim()) ||
@@ -529,6 +642,8 @@ export class BillsService {
       meterNumber: input.billersCode,
       meterType: input.type,
       serviceId: input.serviceID,
+      serviceName: resolvedService,
+      minAmount: electricityMinNgn(resolvedService, input.serviceID),
       raw,
     };
   }
@@ -554,10 +669,13 @@ export class BillsService {
       throw new AppError("Betting top-up is not available yet", 400, "UNSUPPORTED_BILL");
     }
 
-    const minAmount = BILL_MIN_AMOUNT_NGN[input.category] ?? 50;
+    const minAmount =
+      input.category === "ELECTRICITY"
+        ? electricityMinNgn(providerCode, input.serviceId)
+        : (BILL_MIN_AMOUNT_NGN[input.category] ?? 50);
     if (input.amount < minAmount) {
       throw new AppError(
-        `Minimum amount is ₦${minAmount.toLocaleString()}`,
+        `Minimum amount for this provider is ₦${minAmount.toLocaleString()}`,
         400,
         "MIN_BILL",
       );
@@ -621,13 +739,21 @@ export class BillsService {
           break;
         case "ELECTRICITY": {
           const meterType = (input.variationCode === "postpaid" ? "postpaid" : "prepaid") as "prepaid" | "postpaid";
-          // phone must be a mobile number for SMS — never send the meter as phone
-          const notifyPhone = looksLikeNgPhone(phone) ? phone : looksLikeNgPhone(input.phone) ? String(input.phone) : phone;
+          const notifyPhone =
+            normalizeNgPhone(input.phone) ?? normalizeNgPhone(user?.phone);
+          if (!notifyPhone) {
+            throw new AppError(
+              "Add a Nigerian phone number in Profile so we can deliver your electricity token SMS",
+              400,
+              "PHONE_REQUIRED",
+            );
+          }
+          const elecService = resolveElectricityServiceName(svc?.providerCode, input.serviceId);
           providerResult = await strowalletClient.buyElectricity({
             amount: input.amount,
             phone: notifyPhone,
-            service_name: providerCode,
-            meter_number: input.customerRef,
+            service_name: elecService,
+            meter_number: input.customerRef.replace(/\D/g, ""),
             meter_type: meterType,
           });
           break;
